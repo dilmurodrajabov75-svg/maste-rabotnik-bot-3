@@ -143,7 +143,8 @@ def reg_phone(message):
   @bot.message_handler(
     func=lambda msg: str(msg.from_user.id) in user_temp
     and user_temp[str(msg.from_user.id)].get("step") == "age"
-)def reg_age(message):
+)
+  def reg_age(message):
   user_id = str(message.from_user.id)
   user_temp[user_id]["age"] = message.text
   user_temp[user_id]["step"] = "gender"
