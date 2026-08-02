@@ -6,7 +6,7 @@ from flask import Flask
 from telebot import TeleBot, types
 
 # ================= SOZLAMALAR =================
-TOKEN = "8436888553:AAEp9WI6UzuwtIaqFvaaqfCsYipmkKsdXcA"
+TOKEN = "8616264461:AAEeDOBBVwUSU9iWN0Z_bt7O3P1NAQTtKpE"
 BOT_USERNAME = "Master_rabotnikbot"
 CHANNEL_ID = "@ish_keremidi"
 ADMIN_ID = 8554402317  # Sizning Telegram ID-ingiz
