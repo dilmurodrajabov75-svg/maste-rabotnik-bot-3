@@ -399,16 +399,16 @@ def create_post(message):
 )
 def handle_new_job_post(message):
         try:
-        data = [item.strip() for item in message.text.split("|")]
-        if len(data) < 6:
+            data = [item.strip() for item in message.text.split("|")]
+            if len(data) < 6:
             bot.reply_to(
                 message,
                 "❌ Format noto'g'ri! Ma'lumotlarni to'g'ri kiriting."
             )
             return  # <-- return 'if' shartining ichida bo'lishi kerak
 
-        post_id = str(int(time.time()))[-4:]
-        posts_db[post_id] = {
+            post_id = str(int(time.time()))[-4:]
+            posts_db[post_id] = {
             "ish_haqqi": data[0],
             "ovqat": data[1],
             "vaqt": data[2],
@@ -416,7 +416,7 @@ def handle_new_job_post(message):
             "qoshimcha": data[4],
             "phone": data[5],
         }
-        save_data("posts.json", posts_db)
+            save_data("posts.json", posts_db)
         
         # ... o'rtadagi caption va yuborish kodlaringiz ...
 
