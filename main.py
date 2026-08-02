@@ -1,316 +1,492 @@
 import json
 import os
-import threading
 import time
-from flask import Flask
 from telebot import TeleBot, types
 
-# ==================== SOZLAMALAR ====================
+# ==============================================================================
+# 1. ASOSIY KONFIGURATSIYA VA GLOBAL SOZLAMALAR
+# ==============================================================================
 TOKEN = "8603747344:AAECBz0DiO3ZCfUknqXtfreLYxc5LNdnCOs"
 BOT_USERNAME = "Master_rabotnikbot"
 CHANNEL_ID = "@ish_keremidi"
-ADMIN_ID = 8554402317  # Sizning Telegram ID-ingiz
+CHANNEL_USERNAME = "ish_keremidi"
+ADMIN_ID = 8554402317
 
 KARTA_RAQAMI = "4413 5976 0016 9336"
 KARTA_EGASI = "Rajabov Dilmurod"
-XIZMAT_HAQQI = "30 000"
-# ====================================================
+XIZMAT_HAQQI = "20 000"
 
-# --- 24/7 Server qismi ---
-app = Flask(__name__)
+USERS_FILE = "users.json"
+POSTS_FILE = "posts.json"
 
-@app.route("/")
-def home():
-    return "Master Rabotnik Bot ishlamoqda!"
+# ==============================================================================
+# 2. MA'LUMOTLAR BAZASINI YUKLASH VA SAQLASH FUNKSIYALARI
+# ==============================================================================
+def load_data(file_name):
+    if os.path.exists(file_name):
+        try:
+            with open(file_name, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
 
-def run_flask():
-    app.run(host="0.0.0.0", port=8080)
+def save_data(file_name, data):
+    try:
+        with open(file_name, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"Ma'lumotlarni saqlashda xatolik yuz berdi: {e}")
 
-threading.Thread(target=run_flask, daemon=True).start()
+users_db = load_data(USERS_FILE)
+posts_db = load_data(POSTS_FILE)
+
+temp_data = {}
+admin_post_temp = {}
+
+# ==============================================================================
+# 3. HUDUDLAR VA TUMANLAR LUG'ATI (TO'LIQ BAZA)
+# ==============================================================================
+TUMANLAR = {
+    "Toshkent shahri": [
+        "Yunusobod", "Chilonzor", "Mirzo Ulug'bek", "Yashnobod", 
+        "Olmazor", "Mirobod", "Sergeli", "Yakkasaroy", 
+        "Uchtepa", "Bektemir", "Yangihayot", "Shayxontohur"
+    ],
+    "Toshkent viloyati": [
+        "Chirchiq sh.", "Olmaliq sh.", "Angren sh.", "Yangiyo'l sh.", 
+        "Bekobod sh.", "Qibray", "Zangiota", "Toshkent t.", 
+        "Parkent", "Pskent", "O'rtachirchiq", "Quyichirchiq", 
+        "Buka", "Chinaz", "Oqqurg'on", "Bostanliq"
+    ],
+    "Farg'ona": [
+        "Farg'ona sh.", "Marg'ilon sh.", "Qo'qon sh.", "Quvasoy sh.", 
+        "Quva", "Oltiariq", "Rishtan", "Buvayda", 
+        "Uchko'prik", "Beshariq", "Bag'dod", "Farg'ona t.", 
+        "O'zbekiston t.", "Toshloq", "Yozyovon", "Sox"
+    ],
+    "Andijon": [
+        "Andijon sh.", "Xonobod sh.", "Asaka", "Shahrixon", 
+        "Xo'jaobod", "Buloqboshi", "Marhamat", "Izboskan", 
+        "Paxtaobod", "Andijon t.", "Oltinko'l", "Jalaquduq", 
+        "Boz", "Ulug'nor", "Qurg'ontepa"
+    ],
+    "Namangan": [
+        "Namangan sh.", "Chust", "Pop", "Kosonsoy", 
+        "Uychi", "To'raqo'rg'on", "Uchqo'rg'on", "Mingbulaq", 
+        "Namangan t.", "Norin", "Yangiqo'rg'on"
+    ],
+    "Samarqand": [
+        "Samarqand sh.", "Kattaqo'rg'on sh.", "Pastdarg'om", "Jomboy", 
+        "Toyloq", "Urgut", "Bulung'ur", "Ishtixon", 
+        "Paxtachi", "Payariq", "Qo'shrabot", "Narpay", 
+        "Samarqand t.", "Nurobod"
+    ],
+    "Buxoro": [
+        "Buxoro sh.", "Kogon sh.", "G'ijduvon", "Jondor", 
+        "Peshku", "Romitan", "Vobkent", "Qorakul", 
+        "Olot", "Qorovulbozor", "Shofirkon", "Buxoro t."
+    ],
+    "Xorazm": [
+        "Urganch sh.", "Xiva sh.", "Xonqa", "Gurlan", 
+        "Shovot", "Yangiariq", "Bog'ot", "Qo'shko'pir", 
+        "Yangiqala", "Hazorasp", "Tuproqqala", "Urganch t."
+    ],
+    "Qashqadaryo": [
+        "Qarshi sh.", "Shahrisabz sh.", "Kitob", "Yakkabog'", 
+        "Kamashi", "G'uzor", "Nishan", "Kasbi", 
+        "Chiroqchi", "Dehqonobod", "Muborak", "Qarshi t.", 
+        "Shahrisabz t.", "Ko'kdala"
+    ],
+    "Surxondaryo": [
+        "Termiz sh.", "Denov", "Sherobod", "Sariosiyo", 
+        "Qumqo'rg'on", "Jarqo'rg'on", "Boysun", "Uzun", 
+        "Oltinsoy", "Angor", "Muzrabot", "Termiz t.", "Bandixon"
+    ],
+    "Navoiy": [
+        "Navoiy sh.", "Zarafshon sh.", "Karmana", "Qiziltepa", 
+        "Xatirchi", "Uchquduq", "Nurota", "Navbahor", 
+        "Konimex", "Tomdi"
+    ],
+    "Jizzax": [
+        "Jizzax sh.", "Zomin", "G'allaorol", "Paxtakor", 
+        "Do'stlik", "Zarbdor", "Sharof Rashidov", "Forish", 
+        "Baxmal", "Mirzacho'l", "Yangiobod", "Arnasoy"
+    ],
+    "Sirdaryo": [
+        "Guliston sh.", "Yangiyer sh.", "Shirin sh.", "Sardoba", 
+        "Boyovut", "Sayxunobod", "Oqoltin", "Xovos", 
+        "Mirzaobod", "Guliston t."
+    ],
+    "Qoraqalpog'iston": [
+        "Nukus sh.", "Turtko'l", "Beruniy", "Xo'jayli", 
+        "Chimboy", "Qo'ng'irot", "Mo'ynoq", "Amudaryo", 
+        "Ellikqala", "Kegeyli", "Qonliko'l", "Qorao'zak", 
+        "Taxtako'pir", "Shumanay", "Bozataw"
+    ]
+}
 
 bot = TeleBot(TOKEN)
 
-# --- Ma'lumotlar bazasi ---
-def load_data(filename):
-    if os.path.exists(filename):
+# ==============================================================================
+# 4. KANALGA OBUNANI TEKSHIRISH MEXANIZMI
+# ==============================================================================
+def check_subscription(user_id):
+    try:
+        member = bot.get_chat_member(f"@{CHANNEL_USERNAME}", user_id)
+        if member.status in ['member', 'administrator', 'creator']:
+            return True
+        return False
+    except Exception:
+        return False
+
+def send_subscription_prompt(chat_id):
+    markup = types.InlineKeyboardMarkup()
+    btn_channel = types.InlineKeyboardButton("📢 Kanalga obuna bo'lish", url=f"https://t.me/{CHANNEL_USERNAME}")
+    btn_check = types.InlineKeyboardButton("🔄 Tekshirish", callback_data="check_sub")
+    markup.add(btn_channel)
+    markup.add(btn_check)
+    
+    bot.send_message(
+        chat_id,
+        "⚠️ Hurmatli foydalanuvchi, botimiz xizmatlaridan mukammal foydalanish uchun quyidagi rasmiy kanalimizga to'liq obuna bo'lishingiz talab etiladi!\n\nKanalga a'zo bo'lib, so'ngra pastdagi tugmani bosing:",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "check_sub")
+def verify_subscription_callback(call):
+    user_id = call.from_user.id
+    if check_subscription(user_id):
+        bot.answer_callback_query(call.id, "✅ Obunangiz muvaffaqiyatli tasdiqlandi!")
         try:
-            with open(filename, "r", encoding="utf-8") as f:
-                return json.load(f)
+            bot.delete_message(call.message.chat.id, call.message.message_id)
         except Exception:
             pass
-    return {}
-
-def save_data(filename, data):
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-
-users_db = load_data("users.json")
-posts_db = load_data("posts.json")
-user_temp = {}
-admin_post_temp = {}
+        
+        fake_message = call.message
+        fake_message.from_user = call.from_user
+        fake_message.text = "/start"
+        start_cmd(fake_message)
+    else:
+        bot.answer_callback_query(call.id, "❌ Siz hali kanalga obuna bo'lmadingiz!", show_alert=True)
 
 
-# --- 1. START ---
-@bot.message_handler(commands=["start"])
-def start_command(message):
+# ==============================================================================
+# 5. START VA KENGAYTIRILGAN RO'YXATDAN O'TISH QADAMLARI
+# ==============================================================================
+@bot.message_handler(commands=['start'])
+def start_cmd(message):
     user_id = str(message.from_user.id)
     args = message.text.split()
 
-    if len(args) > 1 and args[0].startswith("/start"):
-        param = args[1]
-        if param.startswith("job_"):
-            post_id = param.replace("job_", "")
-            if post_id in posts_db:
-                post = posts_db[post_id]
-                text = (
-                    f"📌 **E'lon ma'lumotlari:**\n\n"
-                    f"🏢 **Hudud:** {post['manzil']}\n"
-                    f"💰 **Ish haqqi:** {post['ish_haqqi']}\n"
-                    f"📞 **Aloqa:** {post['phone']}\n\n"
-                    f"⚠️ Bog'lanish uchun yuqoridagi raqamga qo'ng'iroq qiling yoki yozing."
-                )
-                bot.send_message(message.chat.id, text, parse_mode="Markdown")
-                return
-
-    if user_id in users_db:
-        if users_db[user_id].get("status") == "blocked":
-            bot.send_message(message.chat.id, "❌ Siz botdan foydalanish huquqidan mahrum qilingansiz.")
-            return
-        if users_db[user_id].get("status") == "pending":
-            bot.send_message(message.chat.id, "⏳ Sizning to'lovingiz adminga yuborilgan. Tasdiqlashini kuting.")
-            return
-        if users_db[user_id].get("status") == "active":
-            main_menu(message.chat.id)
-            return
-
-    user_temp[user_id] = {"step": "full_name"}
-    bot.send_message(
-        message.chat.id,
-        "👋 Assalomu alaykum! Master Rabotnik botiga xush kelibsiz.\n\n"
-        "Ro'yxatdan o'tish uchun F.I.O. (Familiya Ism Sharifingizni) kiriting:"
-    )
-
-
-# --- 2. RO'YXATDAN O'TISH ---
-@bot.message_handler(func=lambda msg: str(msg.from_user.id) in user_temp and user_temp[str(msg.from_user.id)]["step"] == "full_name")
-def get_full_name(message):
-    user_id = str(message.from_user.id)
-    user_temp[user_id]["full_name"] = message.text
-    user_temp[user_id]["step"] = "phone"
-    bot.send_message(message.chat.id, "📞 Telefon raqamingizni yuboring (Masalan: +998901234567):")
-
-
-@bot.message_handler(func=lambda msg: str(msg.from_user.id) in user_temp and user_temp[str(msg.from_user.id)]["step"] == "phone")
-def get_phone(message):
-    user_id = str(message.from_user.id)
-    user_temp[user_id]["phone"] = message.text
-    user_temp[user_id]["step"] = "region"
-    bot.send_message(message.chat.id, "📍 Qaysi viloyatdansiz?:")
-
-
-@bot.message_handler(func=lambda msg: str(msg.from_user.id) in user_temp and user_temp[str(msg.from_user.id)]["step"] == "region")
-def get_region(message):
-    user_id = str(message.from_user.id)
-    user_temp[user_id]["region"] = message.text
-    user_temp[user_id]["step"] = "district"
-    bot.send_message(message.chat.id, "🏙️ Tuman yoki shahringizni kiriting:")
-
-
-@bot.message_handler(func=lambda msg: str(msg.from_user.id) in user_temp and user_temp[str(msg.from_user.id)]["step"] == "district")
-def get_district(message):
-    user_id = str(message.from_user.id)
-    user_temp[user_id]["district"] = message.text
-    user_temp[user_id]["step"] = "profession"
-    bot.send_message(message.chat.id, "🛠️ Mutaxassisligingiz (Masalan: Santexnik, Malyar):")
-
-
-@bot.message_handler(func=lambda msg: str(msg.from_user.id) in user_temp and user_temp[str(msg.from_user.id)]["step"] == "profession")
-def get_profession(message):
-    user_id = str(message.from_user.id)
-    user_temp[user_id]["profession"] = message.text
-    user_temp[user_id]["step"] = "waiting_receipt"
-
-    text = (
-        f"✅ Ma'lumotlaringiz olindi!\n\n"
-        f"Xizmat haqqi: **{XIZMAT_HAQQI} so'm**.\n"
-        f"💳 **Karta raqami:** `{KARTA_RAQAMI}`\n"
-        f"👤 **Karta egasi:** {KARTA_EGASI}\n\n"
-        f"Pulni o'tkazgach, chek rasmini yuboring!"
-    )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
-
-
-# --- 3. CHEK ---
-@bot.message_handler(content_types=['photo'], func=lambda msg: str(msg.from_user.id) in user_temp and user_temp[str(msg.from_user.id)]["step"] == "waiting_receipt")
-def get_receipt(message):
-    user_id = str(message.from_user.id)
-    photo_id = message.photo[-1].file_id
-    data = user_temp[user_id]
-
-    users_db[user_id] = {
-        "full_name": data["full_name"],
-        "phone": data["phone"],
-        "region": data["region"],
-        "district": data["district"],
-        "profession": data["profession"],
-        "status": "pending"
-    }
-    save_data("users.json", users_db)
-    del user_temp[user_id]
-
-    admin_text = (
-        f"🔔 **Yangi to'lov cheki!**\n\n"
-        f"👤 F.I.O: {data['full_name']}\n"
-        f"📞 Tel: {data['phone']}\n"
-        f"📍 Manzil: {data['region']}, {data['district']}\n"
-        f"🛠️ Kasbi: {data['profession']}\n"
-        f"🆔 ID: `{user_id}`"
-    )
-
-    markup = types.InlineKeyboardMarkup()
-    markup.add(
-        types.InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"approve_{user_id}"),
-        types.InlineKeyboardButton("❌ Rad etish", callback_data=f"reject_{user_id}")
-    )
-
-    bot.send_photo(ADMIN_ID, photo_id, caption=admin_text, reply_markup=markup, parse_mode="Markdown")
-    bot.send_message(message.chat.id, "⏳ Chekingiz adminga yuborildi.")
-
-
-# --- 4. MENYU ---
-def main_menu(chat_id):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("📋 Ish e'lon qilish", "👤 Profilim")
-    bot.send_message(chat_id, "Asosiy menyu:", reply_markup=markup)
-
-
-@bot.message_handler(func=lambda msg: msg.text == "👤 Profilim")
-def profile_handler(message):
-    user_id = str(message.from_user.id)
-    if user_id in users_db:
-        u = users_db[user_id]
-        text = (
-            f"👤 **Profil:**\n\n"
-            f"F.I.O: {u['full_name']}\n"
-            f"Tel: {u['phone']}\n"
-            f"Hudud: {u['region']}, {u['district']}\n"
-            f"Kasb: {u['profession']}\n"
-            f"Status: Faol ✅"
-        )
-        bot.send_message(message.chat.id, text, parse_mode="Markdown")
-
-
-# --- 5. E'LON BERISH ---
-@bot.message_handler(func=lambda msg: msg.text == "📋 Ish e'lon qilish")
-def post_job_start(message):
-    user_id = str(message.from_user.id)
-    if user_id not in users_db or users_db[user_id].get("status") != "active":
-        bot.send_message(message.chat.id, "❌ Siz ro'yxatdan o'tmagansiz yoki to'lovingiz tasdiqlanmagan.")
+    if message.from_user.id == ADMIN_ID and len(args) == 1:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add("➕ E'lon joylash", "📊 Foydalanuvchilar soni")
+        bot.send_message(message.chat.id, "👨‍💻 Xush kelibsiz Admin! Kerakli bo'limni tanlang:", reply_markup=markup)
         return
 
-    admin_post_temp[user_id] = {"step": "region"}
-    bot.send_message(message.chat.id, "📍 E'lon uchun viloyatni kiriting:")
+    if not check_subscription(message.from_user.id):
+        send_subscription_prompt(message.chat.id)
+        return
 
+    if user_id not in users_db:
+        temp_data[user_id] = {'start_args': args[1] if len(args) > 1 else None}
+        msg = bot.send_message(
+            message.chat.id, 
+            "Assalomu alaykum! Master rabotnik tizimiga xush kelibsiz.\n\nIshga joylashish va mukammal profil yaratish uchun ma'lumotlaringizni to'ldiring:\n\n1️⃣ Ism va familiyangizni to'liq kiriting:"
+        )
+        bot.register_next_step_handler(msg, reg_name)
+        return
 
-@bot.message_handler(func=lambda msg: str(msg.from_user.id) in admin_post_temp and admin_post_temp[str(msg.from_user.id)]["step"] == "region")
-def post_region(message):
+    if len(args) > 1 and args[1].startswith("job_"):
+        job_id = args[1].replace("job_", "")
+        show_job_payment(message.chat.id, job_id)
+    else:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add("👤 Mening profilim")
+        bot.send_message(message.chat.id, "Siz allaqachon to'liq ro'yxatdan o'tgansiz! Kanalimizdagi yangi e'lonlarni kuzatib boring.", reply_markup=markup)
+
+def reg_name(message):
     user_id = str(message.from_user.id)
-    admin_post_temp[user_id]["region"] = message.text
-    admin_post_temp[user_id]["step"] = "district"
-    bot.send_message(message.chat.id, "🏙️ Tumanni kiriting:")
+    temp_data[user_id]['name'] = message.text
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    btn_phone = types.KeyboardButton("📞 Telefon raqamni yuborish", request_contact=True)
+    markup.add(btn_phone)
+    msg = bot.send_message(message.chat.id, "2️⃣ Telefon raqamingizni quyidagi maxsus tugma orqali yuboring:", reply_markup=markup)
+    bot.register_next_step_handler(msg, reg_phone)
 
-
-@bot.message_handler(func=lambda msg: str(msg.from_user.id) in admin_post_temp and admin_post_temp[str(msg.from_user.id)]["step"] == "district")
-def post_district(message):
+def reg_phone(message):
     user_id = str(message.from_user.id)
-    admin_post_temp[user_id]["district"] = message.text
-    admin_post_temp[user_id]["step"] = "workers"
-    bot.send_message(message.chat.id, "👷 Kerakli ishchilar soni va mutaxassisligi:")
+    if message.contact:
+        phone = message.contact.phone_number
+    else:
+        phone = message.text
+    temp_data[user_id]['phone'] = phone
+    
+    msg = bot.send_message(
+        message.chat.id, 
+        "3️⃣ Pasportingiz (yoki ID karta) rasmini sifatli holda **rasm (foto) shaklida** yuboring:", 
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    bot.register_next_step_handler(msg, reg_passport)
 
-
-@bot.message_handler(func=lambda msg: str(msg.from_user.id) in admin_post_temp and admin_post_temp[str(msg.from_user.id)]["step"] == "workers")
-def post_workers(message):
+def reg_passport(message):
     user_id = str(message.from_user.id)
-    admin_post_temp[user_id]["workers"] = message.text
-    admin_post_temp[user_id]["step"] = "salary"
-    bot.send_message(message.chat.id, "💰 Ish haqqi qancha?")
+    if message.content_type == 'photo':
+        temp_data[user_id]['passport'] = message.photo[-1].file_id
+        
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        markup.add("Erkak", "Ayol")
+        msg = bot.send_message(message.chat.id, "4️⃣ Jinsingizni tanlang:", reply_markup=markup)
+        bot.register_next_step_handler(msg, reg_gender)
+    else:
+        msg = bot.send_message(message.chat.id, "Iltimos, pasport rasmini aynan **foto** formatida yuboring:")
+        bot.register_next_step_handler(msg, reg_passport)
 
-
-@bot.message_handler(func=lambda msg: str(msg.from_user.id) in admin_post_temp and admin_post_temp[str(msg.from_user.id)]["step"] == "salary")
-def post_salary(message):
+def reg_gender(message):
     user_id = str(message.from_user.id)
-    admin_post_temp[user_id]["salary"] = message.text
-    admin_post_temp[user_id]["step"] = "date"
-    bot.send_message(message.chat.id, "📅 Qachonga kerak?")
+    temp_data[user_id]['gender'] = message.text
+    
+    msg = bot.send_message(
+        message.chat.id, 
+        "5️⃣ Yoshi belgilanmaydi. O'zingizning shaxsiy 1 ta yuzingiz aniq ko'ringan rasmingizni yuboring:", 
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    bot.register_next_step_handler(msg, reg_photo)
 
-
-@bot.message_handler(func=lambda msg: str(msg.from_user.id) in admin_post_temp and admin_post_temp[str(msg.from_user.id)]["step"] == "date")
-def post_date(message):
+def reg_photo(message):
     user_id = str(message.from_user.id)
-    admin_post_temp[user_id]["date"] = message.text
-    admin_post_temp[user_id]["step"] = "details"
-    bot.send_message(message.chat.id, "📝 Qo'shimcha ma'lumot yoki aloqa uchun telefon/username:")
+    if message.content_type == 'photo':
+        temp_data[user_id]['photo'] = message.photo[-1].file_id
+        
+        users_db[user_id] = {
+            'name': temp_data[user_id]['name'],
+            'phone': temp_data[user_id]['phone'],
+            'passport': temp_data[user_id]['passport'],
+            'gender': temp_data[user_id]['gender'],
+            'photo': temp_data[user_id]['photo']
+        }
+        save_data(USERS_FILE, users_db)
+        
+        d_args = temp_data[user_id].get('start_args')
+        del temp_data[user_id]
+        
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add("👤 Mening profilim")
+        bot.send_message(message.chat.id, "🎉 Tabriklaymiz! Ro'yxatdan muvaffaqiyatli o'tdingiz va barcha ma'lumotlaringiz bazada saqlandi.", reply_markup=markup)
+        
+        if d_args and d_args.startswith("job_"):
+            show_job_payment(message.chat.id, d_args.replace("job_", ""))
+    else:
+        msg = bot.send_message(message.chat.id, "Iltimos, shaxsiy rasmingizni aynan **foto** formatida yuboring:")
+        bot.register_next_step_handler(msg, reg_photo)
 
 
-@bot.message_handler(func=lambda msg: str(msg.from_user.id) in admin_post_temp and admin_post_temp[str(msg.from_user.id)]["step"] == "details")
-def post_details(message):
-    user_id = str(message.from_user.id)
-    data = admin_post_temp[user_id]
-    data["details"] = message.text
+# ==============================================================================
+# 6. ADMIN TOMONIDAN KANALGA E'LON JOYLASHTIRISH TIZIMI
+# ==============================================================================
+@bot.message_handler(func=lambda msg: msg.text == "➕ E'lon joylash" and msg.from_user.id == ADMIN_ID)
+def start_post_creation(message):
+    admin_post_temp[message.chat.id] = {}
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup.add("Toshkent shahri", "Toshkent viloyati")
+    markup.add("Farg'ona", "Andijon", "Namangan")
+    markup.add("Samarqand", "Buxoro", "Xorazm")
+    markup.add("Qashqadaryo", "Surxondaryo", "Navoiy")
+    markup.add("Jizzax", "Sirdaryo", "Qoraqalpog'iston")
+
+    msg = bot.send_message(message.chat.id, "📍 1/5. Viloyatni tanlang:", reply_markup=markup)
+    bot.register_next_step_handler(msg, process_step_region)
+
+def process_step_region(message):
+    region = message.text
+    admin_post_temp[message.chat.id]["region"] = region
+
+    tumanlar_list = TUMANLAR.get(region, [])
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+
+    if tumanlar_list:
+        for i in range(0, len(tumanlar_list), 2):
+            pair = tumanlar_list[i:i+2]
+            markup.add(*pair)
+        msg_text = f"🏙 2/5. *{region}* bo'yicha tumanni tanlang:"
+    else:
+        markup = types.ReplyKeyboardRemove()
+        msg_text = "🏙 2/5. Tuman yoki manzilni kiriting:"
+
+    msg = bot.send_message(message.chat.id, msg_text, reply_markup=markup, parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_step_district)
+
+def process_step_district(message):
+    admin_post_temp[message.chat.id]["district"] = message.text
+
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup.add("1 ta", "2 ta", "3 ta", "4-5 ta", "Jamoa kerak")
+
+    msg = bot.send_message(message.chat.id, "👥 3/5. Nechta ishchi kerakligini tanlang:", reply_markup=markup)
+    bot.register_next_step_handler(msg, process_step_workers)
+
+def process_step_workers(message):
+    admin_post_temp[message.chat.id]["workers"] = message.text
+
+    msg = bot.send_message(message.chat.id, "💰 4/5. Ish haqqini kiriting:", reply_markup=types.ReplyKeyboardRemove())
+    bot.register_next_step_handler(msg, process_step_salary)
+
+def process_step_salary(message):
+    admin_post_temp[message.chat.id]["salary"] = message.text
+
+    msg = bot.send_message(
+        message.chat.id, 
+        "📝 5/5. Batafsil ma'lumot va ish beruvchining aloqa raqamini kiriting:", 
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    bot.register_next_step_handler(msg, process_step_final)
+
+def process_step_final(message):
+    chat_id = message.chat.id
+    data = admin_post_temp.get(chat_id, {})
+    details = message.text
 
     post_id = str(int(time.time()))[-4:]
     posts_db[post_id] = {
-        "ish_haqqi": data["salary"],
-        "manzil": f"{data['region']}, {data['district']}",
-        "phone": data["details"],
+        "text": (
+            f"📍 Hudud: {data['region']} ({data['district']})\n"
+            f"👥 Kerakli ishchilar: {data['workers']}\n"
+            f"💰 Ish haqqi: {data['salary']}\n"
+            f"📝 Batafsil: {details}"
+        ),
+        "contacts": details
     }
-    save_data("posts.json", posts_db)
+    save_data(POSTS_FILE, posts_db)
+    del admin_post_temp[chat_id]
 
     caption = (
-        f"📍 Hudud: {data['region']} ({data['district']})\n"
-        f"👷 Ishchilar: {data['workers']}\n"
-        f"💰 Ish haqqi: {data['salary']}\n"
-        f"📅 Sana: {data['date']}\n"
-        f"📝 Batafsil: {data['details']}\n\n"
-        f"🟢 Holat: Faol\n"
-        f"#{post_id}"
+        f"{posts_db[post_id]['text']}\n\n"
+        f"🟢 Holat: Faol\n#{post_id}"
     )
 
     keyboard = types.InlineKeyboardMarkup()
-    keyboard.add(
-        types.InlineKeyboardButton(
-            "📋 Ishga yozilish",
-            url=f"https://t.me/{BOT_USERNAME}?start=job_{post_id}",
-        )
+    keyboard.add(types.InlineKeyboardButton("📥 Ishga yozilish", url=f"https://t.me/{BOT_USERNAME}?start=job_{post_id}"))
+
+    bot.send_message(CHANNEL_ID, caption, reply_markup=keyboard)
+    bot.send_message(chat_id, f"✅ E'lon #{post_id} muvaffaqiyatli kanalga joylandi!")
+
+
+# ==============================================================================
+# 7. TO'LOV VA ISH BERUVCHI KONTAKTINI TAQDIM ETISH
+# ==============================================================================
+def show_job_payment(chat_id, job_id):
+    if not check_subscription(chat_id):
+        send_subscription_prompt(chat_id)
+        return
+
+    job = posts_db.get(job_id)
+    if not job:
+        bot.send_message(chat_id, "❌ Kechirasiz, bu e'lon topilmadi yoki o'chirilgan.")
+        return
+
+    text = (
+        f"📋 **Tanlangan e'lon:**\n{job['text']}\n\n"
+        f"💳 **To'lov rekvizitlari:**\n"
+        f"Karta raqami: `{KARTA_RAQAMI}`\n"
+        f"Karta egasi: **{KARTA_EGASI}**\n"
+        f"Xizmat haqqi: **{XIZMAT_HAQQI} so'm**\n\n"
+        f"Ish beruvchi kontaktini olish uchun ko'rsatilgan summani o'tkazing va **chekni rasm shaklida** yuboring!"
     )
+    msg = bot.send_message(chat_id, text, parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_receipt, job_id)
 
-    bot.send_message(CHANNEL_ID, caption, reply_markup=keyboard, parse_mode="Markdown")
-    bot.send_message(message.chat.id, f"✅ E'lon kanalga joylandi! (ID: #{post_id})", parse_mode="Markdown")
-    del admin_post_temp[user_id]
+def process_receipt(message, job_id):
+    chat_id = message.chat.id
+    if message.content_type == 'photo':
+        photo_id = message.photo[-1].file_id
+        
+        markup = types.InlineKeyboardMarkup()
+        btn_app = types.InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"app_{chat_id}_{job_id}")
+        btn_rej = types.InlineKeyboardButton("❌ Rad etish", callback_data=f"rej_{chat_id}_{job_id}")
+        markup.add(btn_app, btn_rej)
+        
+        user = users_db.get(str(chat_id), {})
+        caption = (
+            f"📥 **YANGI TO'LOV CHEKI KELDI!**\n\n"
+            f"👤 **Ishchi:** {user.get('name')}\n"
+            f"📞 **Telefon:** {user.get('phone')}\n"
+            f"🆔 E'lon ID: `#{job_id}`"
+        )
+        bot.send_photo(ADMIN_ID, photo_id, caption=caption, reply_markup=markup, parse_mode="Markdown")
+        bot.send_message(chat_id, "✅ Chekingiz adminga yuborildi! Tasdiqlangach, kontakt yuboriladi.")
+    else:
+        msg = bot.send_message(chat_id, "Iltimos, to'lov chekini faqatgina **rasm (foto)** ko'rinishida yuboring:")
+        bot.register_next_step_handler(msg, process_receipt, job_id)
 
 
-# --- 6. CALLBACK ---
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    data = call.data
-    if data.startswith("approve_"):
-        user_id = data.replace("approve_", "")
-        if user_id in users_db:
-            users_db[user_id]["status"] = "active"
-            save_data("users.json", users_db)
-            bot.send_message(user_id, "✅ To'lovingiz tasdiqlandi!")
-            bot.answer_callback_query(call.id, "Tasdiqlandi!")
-            bot.edit_message_caption(chat_id=call.message.chat.id, message_id=call.message.message_id, caption=call.message.caption + "\n\n✅ **TASDIQLANDI**", parse_mode="Markdown")
-    elif data.startswith("reject_"):
-        user_id = data.replace("reject_", "")
-        if user_id in users_db:
-            users_db[user_id]["status"] = "blocked"
-            save_data("users.json", users_db)
-            bot.send_message(user_id, "❌ To'lovingiz rad etildi.")
-            bot.answer_callback_query(call.id, "Rad etildi!")
-            bot.edit_message_caption(chat_id=call.message.chat.id, message_id=call.message.message_id, caption=call.message.caption + "\n\n❌ **RAD ETILDI**", parse_mode="Markdown")
+# ==============================================================================
+# 8. ADMINNING TO'LOVNI TASDIQLASH YOKI RAD ETISH AMallari
+# ==============================================================================
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('app_', 'rej_')))
+def admin_approval(call):
+    parts = call.data.split('_')
+    action = parts[0]
+    user_id = int(parts[1])
+    job_id = parts[2]
+
+    if action == 'app':
+        job = posts_db.get(job_id, {})
+        contacts = job.get('contacts', 'Ma\'lumot topilmadi')
+        
+        success_text = (
+            f"🎉 **To'lovingiz tasdiqlandi!**\n\n"
+            f"📞 **Ish beruvchi ma'lumotlari:**\n"
+            f"{contacts}"
+        )
+        bot.send_message(user_id, success_text, parse_mode="Markdown")
+        bot.answer_callback_query(call.id, "Muvaffaqiyatli tasdiqlandi!")
+        try:
+            bot.edit_message_caption(
+                chat_id=ADMIN_ID, 
+                message_id=call.message.message_id, 
+                caption=call.message.caption + "\n\n✅ Holat: Tasdiqlandi", 
+                reply_markup=None
+            )
+        except Exception:
+            pass
+    elif action == 'rej':
+        bot.send_message(user_id, "❌ To'lov chekingiz rad etildi.")
+        bot.answer_callback_query(call.id, "Rad etildi!")
+        try:
+            bot.edit_message_caption(
+                chat_id=ADMIN_ID, 
+                message_id=call.message.message_id, 
+                caption=call.message.caption + "\n\n❌ Holat: Rad etildi", 
+                reply_markup=None
+            )
+        except Exception:
+            pass
 
 
-if __name__ == "__main__":
-    bot.infinity_polling()
-  
+# ==============================================================================
+# 9. PROFIL VA STATISTIKA BO'LIMI
+# ==============================================================================
+@bot.message_handler(func=lambda msg: msg.text == "👤 Mening profilim")
+def show_profile(message):
+    user_id_str = str(message.from_user.id)
+    user = users_db.get(user_id_str)
+    if user:
+        text = (
+            f"👤 **Sizning shaxsiy profilingiz:**\n\n"
+            f"**Ism va familiya:** {user.get('name')}\n"
+            f"**Telefon raqam:** {user.get('phone')}\n"
+            f"**Jins:** {user.get('gender')}\n\n"
+            f"📸 **Pasport va shaxsiy rasmingiz bazada xavfsiz saqlanmoqda.**"
+        )
+        try:
+            bot.send_photo(message.chat.id, user.get('photo'), caption=text, parse_mode="Markdown")
+        except Exception:
+            bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    else:
+        bot.send_message(message.chat.id, "❌ Profil topilmadi. /start buyrug'ini bosing.")
+
+@bot.message_handler(func=lambda msg: msg.text == "📊 Foydalanuvchilar soni" and msg.from_user.id == ADMIN_ID)
+def count_users(mess
