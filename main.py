@@ -140,7 +140,7 @@ def reg_phone(message):
       reply_markup=types.ReplyKeyboardRemove(),
       parse_mode="Markdown",
     )
-    @bot.message_handler(
+  @bot.message_handler(
     func=lambda msg: str(msg.from_user.id) in user_temp
     and user_temp[str(msg.from_user.id)].get("step") == "age"
 )
