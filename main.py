@@ -145,9 +145,9 @@ def reg_phone(message):
     and user_temp[str(msg.from_user.id)].get("step") == "age"
 )
   def reg_age(message):
-  user_id = str(message.from_user.id)
-  user_temp[user_id]["age"] = message.text
-  user_temp[user_id]["step"] = "gender"
+      user_id = str(message.from_user.id)
+      user_temp[user_id]["age"] = message.text
+      user_temp[user_id]["step"] = "gender"
 
   markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
   markup.add("👨 Erkak", "👩 Ayol")
