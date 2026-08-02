@@ -401,7 +401,7 @@ def handle_new_job_post(message):
         try:
             data = [item.strip() for item in message.text.split("|")]
             if len(data) < 6:
-            bot.reply_to(
+               bot.reply_to(
                 message,
                 "❌ Format noto'g'ri! Ma'lumotlarni to'g'ri kiriting."
             )
