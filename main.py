@@ -17,7 +17,7 @@ XIZMAT_HAQQI = "30 000"
 # ==============================================
 
 # --- 24/7 Server qismi (Replit uxlab qolmasligi uchun) ---
-app = Flask("")
+app = Flask(__name__)
 
 
 @app.route("/")
@@ -30,8 +30,9 @@ def run_flask():
 
 
 threading.Thread(target=run_flask, daemon=True).start()
-
 bot = TeleBot(TOKEN)
+
+# Bot buyruqlari va qolgan qismi...
 
 
 # --- Ma'lumotlar bazasini yuklash va saqlash ---
@@ -733,3 +734,5 @@ bot.send_message(
       parse_mode="Markdown",
   )
   del admin_post_temp[chat_id]
+if __name__ == "__main__":
+    bot.infinity_polling()
