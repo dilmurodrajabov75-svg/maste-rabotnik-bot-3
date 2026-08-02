@@ -405,7 +405,7 @@ def handle_new_job_post(message):
           message,
           "❌ Format noto'g'ri! Ma'lumotlarni 6 ta qismga | belgisida ajratib yozing.",
       )
-      return
+return
         post_id = str(int(time.time()))[-4:]
     posts_db[post_id] = {
         "ish_haqqi": data[0],
