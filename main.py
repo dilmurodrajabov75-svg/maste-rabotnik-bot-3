@@ -415,19 +415,19 @@ def handle_new_job_post(message):
             "manzil": data[3],
             "qoshimcha": data[4],
             "phone": data[5],
-        }
+            }
             save_data("posts.json", posts_db)
         
-        # ... o'rtadagi caption va yuborish kodlaringiz ...
+           # ... o'rtadagi caption va yuborish kodlaringiz ...
 
     except Exception as e:
         print(f"Xatolik: {e}")
 
-    caption = (
+        caption = (
         f"👷‍♂️ Ishchilar kanali\n\n💰 Ish haqqi: {data[0]} so'm\n"
         f"🍲 Ovqat: {data[1]}\n⏰ Vaqt: {data[2]}\n📍 Manzil: {data[3]}\n"
         f"⭐️ Xizmat haqqi: {XIZMAT_HAQQI} so'm\n📝 Qo'shimcha: {data[4]}\n\n🟢 Holat: Faol\n№ {post_id}"
-    )
+        )
 
     keyboard = types.InlineKeyboardMarkup()
     keyboard.add(
