@@ -398,27 +398,50 @@ def create_post(message):
     and msg.from_user.id == ADMIN_ID
 )
 def handle_new_job_post(message):
-        try:
-            data = [item.strip() for item in message.text.split("|")]
-            if len(data) < 6:
-               bot.reply_to(
+    try:
+        data = [item.strip() for item in message.text.split("|")]
+        if len(data) < 6:
+            bot.reply_to(
                 message,
                 "❌ Format noto'g'ri! Ma'lumotlarni to'g'ri kiriting."
             )
-            return  # <-- return 'if' shartining ichida bo'lishi kerak
+            return
 
-            post_id = str(int(time.time()))[-4:]
-            posts_db[post_id] = {
+        post_id = str(int(time.time()))[-4:]
+        posts_db[post_id] = {
             "ish_haqqi": data[0],
             "ovqat": data[1],
             "vaqt": data[2],
             "manzil": data[3],
             "qoshimcha": data[4],
             "phone": data[5],
-            }
-            save_data("posts.json", posts_db)
-        
-           # ... o'rtadagi caption va yuborish kodlaringiz ...
+        }
+        save_data("posts.json", posts_db)
+
+        caption = (
+            f"👷‍♂️ Ishchilar kanali\n\n"
+            f"💰 Ish haqqi: {data[0]} so'm\n"
+            f"🍲 Ovqat: {data[1]}\n"
+            f"⏰ Vaqt: {data[2]}\n"
+            f"📍 Manzil: {data[3]}\n"
+            f"⭐️ Xizmat haqqi: {XIZMAT_HAQQI} so'm\n"
+            f"📝 Qo'shimcha: {data[4]}\n\n"
+            f"🟢 Holat: Faol\n№ {post_id}"
+        )
+
+        keyboard = types.InlineKeyboardMarkup()
+        keyboard.add(
+            types.InlineKeyboardButton(
+                "📝 Ishga yozilish",
+                url=f"https://t.me/{BOT_USERNAME}?start=apply_{post_id}"
+            )
+        )
+
+        bot.send_message(
+            CHANNEL_ID,
+            caption,
+            reply_markup=keyboard
+        )
 
     except Exception as e:
         print(f"Xatolik: {e}")
