@@ -468,10 +468,10 @@ async def admin_cb(c: CallbackQuery, state: FSMContext):
     act = c.data[4:]
     await c.answer()
     if act == "stats":
-        n = lambda s: q(s, one=True)[0]
-        await c.message.answer(
-            f"📊 Foydalanuvchilar: {n('SELECT COUNT(*) FROM users')}\n"
-            f"🚫 Bloklangan: {n('SELECT COUNT(*) FROM users WHERE banned=1')}\n"
-            f"📢 E'lonlar: {n('SELECT COUNT(*) FROM ads')}\n"
-            f"📝 Arizalar: {n('SELECT COUNT(*) FROM apps')}\n"
-            f"✅ To'langan: {n(chr(83)+'ELECT COUNT(*) FROM apps WHER
+        total_users = q("SELECT COUNT(*) FROM users", one=True)[0]
+        banned = q("SELECT COUNT(*) FROM users WHERE banned=1", one=True)[0]
+        total_ads = q("SELECT COUNT(*) FROM ads", one=True)[0]
+        total_apps = q("SELECT COUNT(*) FROM apps", one=True)[0]
+        paid = q("SELECT COUNT(*) FROM apps WHERE status='paid'", one=True)[0]
+        text = ("📊 Foydalanuvchilar: " + str(total_users) + "\n"
+ 
