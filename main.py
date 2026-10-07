@@ -26,7 +26,7 @@ from aiogram.types import (CallbackQuery, InputMediaPhoto, KeyboardButton,
                            Message, ReplyKeyboardRemove)
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
-BOT_TOKEN = "8350987756:AAFOms_5ccVJJ873nK7FUwS8xpEyjq5DLkk"
+BOT_TOKEN = "8350987756:AAGRA2u9YejsHkiv8euNCB-Eyrz8pPqOZqk"
 ADMIN_ID = 8554402317
 CHANNEL_ID = "@ish_keremidi"
 
