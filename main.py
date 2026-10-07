@@ -473,5 +473,9 @@ async def admin_cb(c: CallbackQuery, state: FSMContext):
         total_ads = q("SELECT COUNT(*) FROM ads", one=True)[0]
         total_apps = q("SELECT COUNT(*) FROM apps", one=True)[0]
         paid = q("SELECT COUNT(*) FROM apps WHERE status='paid'", one=True)[0]
-        text = ("📊 Foydalanuvchilar: " + str(total_users) + "\n"
- 
+        text = "📊 Foydalanuvchilar: " + str(total_users)
+        text += "\n🚫 Bloklangan: " + str(banned)
+        text += "\n📢 E'lonlar: " + str(total_ads)
+        text += "\n📝 Arizalar: " + str(total_apps)
+        text += "\n✅ To'langan: " + str(paid)
+        await c.message.answer(text)
