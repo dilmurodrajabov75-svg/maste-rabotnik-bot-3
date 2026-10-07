@@ -1,540 +1,477 @@
-import json
+"""
+Ish e'lonlari boti (aiogram 3.x)
+
+O'rnatish:   pip install aiogram
+Ishga tushirish (Linux/Mac):
+    export BOT_TOKEN="yangi_token"
+    export ADMIN_ID="123456789"        # sizning Telegram ID
+    export CHANNEL_ID="-1001234567890" # kanal ID (bot kanalda admin bo'lsin)
+    python bot.py
+"""
+import asyncio
+import html
+import logging
 import os
-import threading
-import time
-from flask import Flask
-from telebot import TeleBot, types
+import sqlite3
 
-# ================= SOZLAMALAR =================
-TOKEN = "8350987756:AAF6tc1Si0SEXq8B8Y_Lmcc0w73-5xc0vSE"
-BOT_USERNAME = "Master_rabotnikbot"
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
+from aiogram.filters import CommandObject, CommandStart, StateFilter
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import (CallbackQuery, InputMediaPhoto, KeyboardButton,
+                           Message, ReplyKeyboardRemove)
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+
+BOT_TOKEN = "8350987756:AAFOms_5ccVJJ873nK7FUwS8xpEyjq5DLkk"
+ADMIN_ID = 8554402317
 CHANNEL_ID = "@ish_keremidi"
-ADMIN_ID = 8554402317  # Sizning Telegram ID-ingiz
 
-KARTA_RAQAMI = "4413 5976 0016 9336"
-KARTA_EGASI = "Rajabov Dilmurod"
-XIZMAT_HAQQI = "30 000"
-# ==============================================
+PRICES = [100000, 150000, 180000, 200000, 250000, 300000, 400000]
+BOT_USERNAME = ""
 
-# --- 24/7 Server qismi (Replit uxlab qolmasligi uchun) ---
-app = Flask("")
-
-
-@app.route("/")
-def home():
-  return "Master Rabotnik Bot ishlamoqda!"
-
-
-def run_flask():
-  app.run(host="0.0.0.0", port=8080)
-
-
-threading.Thread(target=run_flask, daemon=True).start()
-
-bot = TeleBot(TOKEN)
-
-
-# --- Ma'lumotlar bazasini yuklash va saqlash ---
-def load_data(filename):
-  if os.path.exists(filename):
-    try:
-      with open(filename, "r", encoding="utf-8") as f:
-        return json.load(f)
-    except Exception:
-      return {}
-  return {}
+# ---------------------------------------------------------------- DB
+db = sqlite3.connect("bot.db")
+db.row_factory = sqlite3.Row
+db.executescript("""
+CREATE TABLE IF NOT EXISTS users(
+  id INTEGER PRIMARY KEY, name TEXT, surname TEXT, phone TEXT,
+  address TEXT, age INTEGER, photo TEXT, banned INTEGER DEFAULT 0,
+  username TEXT);
+CREATE TABLE IF NOT EXISTS ads(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, owner INTEGER, kind TEXT,
+  price INTEGER, time TEXT, when_ TEXT, lat REAL, lon REAL, extra TEXT,
+  status TEXT DEFAULT 'active', msg_id INTEGER);
+CREATE TABLE IF NOT EXISTS apps(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ad_id INTEGER, user_id INTEGER,
+  shot1 TEXT, shot2 TEXT, receipt TEXT, status TEXT DEFAULT 'new');
+CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT);
+INSERT OR IGNORE INTO settings VALUES('card','Karta raqami kiritilmagan');
+INSERT OR IGNORE INTO settings VALUES('fee','10 000');
+""")
+db.commit()
 
 
-def save_data(filename, data):
-  with open(filename, "w", encoding="utf-8") as f:
-    json.dump(data, f, ensure_ascii=False, indent=4)
+def q(sql, args=(), one=False, commit=False):
+    cur = db.execute(sql, args)
+    if commit:
+        db.commit()
+        return cur.lastrowid
+    return cur.fetchone() if one else cur.fetchall()
 
 
-users_db = load_data("users.json")
-posts_db = load_data("posts.json")
-user_temp = {}
+def setting(k):
+    return q("SELECT v FROM settings WHERE k=?", (k,), one=True)["v"]
 
 
-# --- 1. START BUYRUG'I VA BLOK/RO'YXAT TEKSHIRUVI ---
-@bot.message_handler(commands=["start"])
-def start_command(message):
-  user_id = str(message.from_user.id)
-  args = message.text.split()
-
-  # Bloklangan foydalanuvchini tekshirish
-  if users_db.get(user_id, {}).get("warnings", 0) >= 3 or users_db.get(
-      user_id, {}
-  ).get("blocked"):
-    bot.send_message(
-        user_id,
-        "🚫 Siz feyk chek yuborganingiz uchun tizimdan avtomatik bloklangansiz!",
-    )
-    return
-
-  # Ro'yxatdan o'tmagan bo'lsa
-  if user_id not in users_db or not users_db[user_id].get("registered"):
-    user_temp[user_id] = {"step": "name", "target_job": None}
-    if len(args) > 1 and args[1].startswith("job_"):
-      user_temp[user_id]["target_job"] = args[1].replace("job_", "")
-
-    bot.send_message(
-        user_id,
-        "👋 Salom! Ishga yozilish uchun avval ro'yxatdan o'tishingiz kerak.\n\n"
-        "1️⃣ Ism va familiyangizni kiriting:\n*(Masalan: Ali Valiyev)*",
-        parse_mode="Markdown",
-    )
-    return
-
-  # Ro'yxatdan o'tgan bo'lsa va e'lon orqali kirgan bo'lsa
-  if len(args) > 1 and args[1].startswith("job_"):
-    send_payment_info(user_id, args[1].replace("job_", ""))
-  else:
-    bot.send_message(
-        user_id,
-        "Siz ro'yxatdan o'tgansiz! Ishga yozilish uchun @ish_keremidi kanalidan e'lonni tanlang.",
-    )
+def get_user(uid):
+    return q("SELECT * FROM users WHERE id=?", (uid,), one=True)
 
 
-# --- 2. RO'YXATDAN O'TISH BOSQICHLARI ---
-@bot.message_handler(
-    func=lambda msg: str(msg.from_user.id) in user_temp
-    and user_temp[str(msg.from_user.id)].get("step") == "name"
-)
-def reg_name(message):
-  user_id = str(message.from_user.id)
-  user_temp[user_id]["full_name"] = message.text
-  user_temp[user_id]["step"] = "phone"
-
-  markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-  markup.add(
-      types.KeyboardButton(
-          "📱 Telefon raqamni yuborish", request_contact=True
-      )
-  )
-  bot.send_message(
-      user_id,
-      "2️⃣ Telefon raqamingizni yuboring:",
-      reply_markup=markup,
-      parse_mode="Markdown",
-  )
+def esc(s):
+    return html.escape(str(s))
 
 
-@bot.message_handler(
-    content_types=["contact", "text"],
-    func=lambda msg: str(msg.from_user.id) in user_temp
-    and user_temp[str(msg.from_user.id)].get("step") == "phone",
-)
-def reg_phone(message):
-  user_id = str(message.from_user.id)
-  phone = (
-      message.contact.phone_number
-      if message.contact
-      else message.text
-  )
-  user_temp[user_id]["phone"] = phone
-  user_temp[user_id]["step"] = "age"
-
-  bot.send_message(
-      user_id,
-      "3️⃣ Yoshingizni kiriting:",
-      reply_markup=types.ReplyKeyboardRemove(),
-      parse_mode="Markdown",
-    )
-  @bot.message_handler(
-    func=lambda msg: str(msg.from_user.id) in user_temp
-    and user_temp[str(msg.from_user.id)].get("step") == "age"
-)
-  def reg_age(message):
-      user_id = str(message.from_user.id)
-      user_temp[user_id]["age"] = message.text
-      user_temp[user_id]["step"] = "gender"
-
-  markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-  markup.add("👨 Erkak", "👩 Ayol")
-  bot.send_message(
-      user_id,
-      "4️⃣ Jinsingizni tanlang:",
-      reply_markup=markup,
-      parse_mode="Markdown",
-  )
+def money(n):
+    return f"{int(n):,}".replace(",", " ")
 
 
-@bot.message_handler(
-    func=lambda msg: str(msg.from_user.id) in user_temp
-    and user_temp[str(msg.from_user.id)].get("step") == "gender"
-)
-def reg_gender(message):
-  user_id = str(message.from_user.id)
-  user_temp[user_id]["gender"] = message.text
-  user_temp[user_id]["step"] = "passport"
-
-  bot.send_message(
-      user_id,
-      "5️⃣ Pasportingiz rasmini yuboring:",
-      reply_markup=types.ReplyKeyboardRemove(),
-      parse_mode="Markdown",
-  )
+# ---------------------------------------------------------------- States
+class Reg(StatesGroup):
+    name = State(); surname = State(); phone = State()
+    address = State(); age = State(); photo = State()
 
 
-@bot.message_handler(
-    content_types=["photo"],
-    func=lambda msg: str(msg.from_user.id) in user_temp
-    and user_temp[str(msg.from_user.id)].get("step") == "passport",
-)
-def reg_passport(message):
-  user_id = str(message.from_user.id)
-  user_temp[user_id]["passport_photo"] = message.photo[-1].file_id
-  user_temp[user_id]["step"] = "photo"
-
-  bot.send_message(
-      user_id,
-      "6️⃣ O'zingizning shaxsiy 1 ta rasmingizni yuboring:",
-      parse_mode="Markdown",
-  )
+class Ad(StatesGroup):
+    kind = State(); price = State(); time = State(); when = State()
+    location = State(); extra = State(); confirm = State()
 
 
-@bot.message_handler(
-    content_types=["photo"],
-    func=lambda msg: str(msg.from_user.id) in user_temp
-    and user_temp[str(msg.from_user.id)].get("step") == "photo",
-)
-def reg_photo(message):
-  user_id = str(message.from_user.id)
-  data = user_temp[user_id]
-  selfie_photo = message.photo[-1].file_id
-
-  # Bazaga saqlash
-  users_db[user_id] = {
-      "registered": True,
-      "full_name": data["full_name"],
-      "phone": data["phone"],
-      "age": data["age"],
-      "gender": data["gender"],
-      "passport": data["passport_photo"],
-      "selfie": selfie_photo,
-      "warnings": 0,
-      "status": "free",
-  }
-  save_data("users.json", users_db)
-
-  # FAQAT ADMINGA SHAXSIY MA'LUMOTLARNI YUBORISH
-  admin_caption = (
-      f"🆕 Yangi ishchi ro'yxatdan o'tdi!\n\n"
-      f"👤 Ism-Familiya: {data['full_name']}\n"
-      f"📞 Tel: {data['phone']}\n"
-      f"🎂 Yosh: {data['age']}\n"
-      f"🚻 Jins: {data['gender']}\n"
-      f"🆔 Telegram ID: {user_id}"
-  )
-
-  try:
-    bot.send_photo(
-        ADMIN_ID,
-        data["passport_photo"],
-        caption=f"📋 {data['full_name']} ning Pasport rasmi",
-    )
-    bot.send_photo(ADMIN_ID, selfie_photo, caption=admin_caption)
-  except Exception as e:
-    print(f"Adminga ma'lumot yuborishda xatolik: {e}")
-
-  target_job = data.get("target_job")
-  del user_temp[user_id]
-
-  bot.send_message(
-      user_id,
-      "🎉 Muvaffaqiyatli ro'yxatdan o'tdingiz!",
-      parse_mode="Markdown",
-  )
-
-  if target_job:
-    send_payment_info(user_id, target_job)
+class Apply(StatesGroup):
+    shot1 = State(); shot2 = State()
 
 
-# --- 3. TO'LOV MA'LUMOTINI YUBORISH VA CHEK QABUL QILISH ---
-def send_payment_info(user_id, post_id):
-  job_info = posts_db.get(post_id)
-
-  if not job_info:
-    bot.send_message(
-        user_id, "❌ Ushbu e'lon topilmadi yoki o'chirilgan!"
-    )
-    return
-
-  users_db[user_id]["status"] = "waiting_receipt"
-  users_db[user_id]["current_job"] = post_id
-  users_db[user_id]["job_info"] = job_info
-  save_data("users.json", users_db)
-
-  msg = (
-      f"📋 Ishga yozilish: #{post_id}\n\n"
-      f"💰 Ish haqqi: {job_info['ish_haqqi']} so'm\n"
-      f"⭐️ Xizmat haqqi: {XIZMAT_HAQQI} so'm\n\n"
-      f"💳 To'lov uchun karta:\n{KARTA_RAQAMI}\n"
-      f"👤 Egasining ismi: {KARTA_EGASI}\n\n"
-      f"📥 Ushbu karta raqamiga {XIZMAT_HAQQI} so'm to'lab, chek rasmini botga yuboring.\n"
-      f"⚠️ *Feyk chek yuborsangiz ogohlantirish beriladi va 3 ta ogohlantirishdan so'ng bloklanasiz!*"
-  )
-  bot.send_message(int(user_id), msg, parse_mode="Markdown")
-@bot.message_handler(
-    content_types=["photo"],
-    func=lambda msg: users_db.get(str(msg.from_user.id), {}).get("status")
-    == "waiting_receipt",
-)
-def handle_receipt(message):
-  user_id = str(message.from_user.id)
-  users_db[user_id]["status"] = "checking"
-  save_data("users.json", users_db)
-
-  markup = types.InlineKeyboardMarkup()
-  markup.add(
-      types.InlineKeyboardButton(
-          "✅ Tasdiqlash", callback_data=f"approve_{user_id}"
-      ),
-      types.InlineKeyboardButton(
-          "❌ Feyk (Ogohlantirish)", callback_data=f"fake_{user_id}"
-      ),
-  )
-
-  caption = (
-      f"📥 Yangi to'lov cheki keldi!\n\n"
-      f"👤 Ishchi: {users_db[user_id]['full_name']}\n"
-      f"📞 Tel: {users_db[user_id]['phone']}\n"
-      f"📋 E'lon ID: #{users_db[user_id]['current_job']}\n"
-      f"⚠️ Ogohlantirishlari: {users_db[user_id]['warnings']}/3"
-  )
-
-  bot.send_photo(
-      ADMIN_ID,
-      message.photo[-1].file_id,
-      caption=caption,
-      reply_markup=markup,
-      parse_mode="Markdown",
-  )
-  bot.reply_to(
-      message,
-      "⏳ Chekingiz admin tekshiruviga yuborildi. Tez orada tasdiqlanadi.",
-  )
+class Adm(StatesGroup):
+    setting = State(); broadcast = State(); ban = State(); unban = State()
 
 
-# --- 4. ADMIN HARAKATLARI (TASDIQLASH/FEYK) ---
-@bot.callback_query_handler(func=lambda call: True)
-def admin_callback(call):
-  if call.from_user.id != ADMIN_ID:
-    return
+router = Router()
+pending_apply = {}  # user_id -> ad_id (ro'yxatdan o'tgach davom ettirish uchun)
 
-  data_parts = call.data.split("_")
-  action = data_parts[0]
-  target_user_id = data_parts[1]
 
-  if action == "approve":
-    users_db[target_user_id]["status"] = "active"
-    job_info = users_db[target_user_id]["job_info"]
-    post_id = users_db[target_user_id]["current_job"]
-    save_data("users.json", users_db)
+class BanMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        u = data.get("event_from_user")
+        if u and u.id != ADMIN_ID:
+            row = get_user(u.id)
+            if row and row["banned"]:
+                return
+        return await handler(event, data)
 
-    success_text = (
-        f"✅ To'lov tasdiqlandi!\n\n"
-        f"📋 E'lon ID: #{post_id}\n"
-        f"📍 Aniq manzil: {job_info['manzil']}\n"
-        f"📞 Ish beruvchi telefoni: {job_info['phone']}"
-    )
-    bot.send_message(
-        int(target_user_id), success_text, parse_mode="Markdown"
-    )
-    bot.edit_message_caption(
-        call.message.caption + "\n\n✅ ADMIN TASDIQLADI",
-        call.message.chat.id,
-        call.message.message_id,
-    )
 
-  elif action == "fake":
-    users_db[target_user_id]["warnings"] += 1
-    warn_count = users_db[target_user_id]["warnings"]
-    users_db[target_user_id]["status"] = "free"
+# ---------------------------------------------------------------- Keyboards
+def main_menu(uid):
+    b = ReplyKeyboardBuilder()
+    b.button(text="📢 E'lon berish")
+    b.button(text="👤 Profilim")
+    if uid == ADMIN_ID:
+        b.button(text="🛠 Admin panel")
+    b.adjust(2, 1)
+    return b.as_markup(resize_keyboard=True)
 
-    if warn_count >= 3:
-      users_db[target_user_id]["blocked"] = True
-      bot.send_message(
-          int(target_user_id),
-          "🚫 Siz 3 marta feyk chek yuborganingiz uchun botdan butunlay bloklandingiz!",
-      )
-      bot.edit_message_caption(
-          call.message.caption + "\n\n❌ FEYK CHEK - FOYDALANUVCHI BLOKLANDI!",
-          call.message.chat.id,
-          call.message.message_id,
-      )
+
+def cancel_kb():
+    b = ReplyKeyboardBuilder()
+    b.button(text="❌ Bekor qilish")
+    return b.as_markup(resize_keyboard=True)
+
+
+def inline(rows):
+    b = InlineKeyboardBuilder()
+    for text, data in rows:
+        b.button(text=text, callback_data=data)
+    return b
+
+
+# ---------------------------------------------------------------- START / RO'YXAT
+@router.message(CommandStart())
+async def start(m: Message, command: CommandObject, state: FSMContext):
+    await state.clear()
+    arg = command.args or ""
+    if arg.startswith("apply_") and arg[6:].isdigit():
+        pending_apply[m.from_user.id] = int(arg[6:])
+    if not get_user(m.from_user.id):
+        await m.answer("Assalomu alaykum! Avval ro'yxatdan o'ting.\n\n✏️ Ismingizni yozing:",
+                       reply_markup=ReplyKeyboardRemove())
+        await state.set_state(Reg.name)
+        return
+    if m.from_user.id in pending_apply:
+        await begin_apply(m, state, pending_apply.pop(m.from_user.id))
+        return
+    await m.answer("Asosiy menyu:", reply_markup=main_menu(m.from_user.id))
+
+
+@router.message(Reg.name, F.text)
+async def reg_name(m: Message, state: FSMContext):
+    await state.update_data(name=m.text.strip())
+    await m.answer("Familiyangizni yozing:")
+    await state.set_state(Reg.surname)
+
+
+@router.message(Reg.surname, F.text)
+async def reg_surname(m: Message, state: FSMContext):
+    await state.update_data(surname=m.text.strip())
+    b = ReplyKeyboardBuilder()
+    b.add(KeyboardButton(text="📞 Raqamni yuborish", request_contact=True))
+    await m.answer("Telefon raqamingizni tugma orqali yuboring:",
+                   reply_markup=b.as_markup(resize_keyboard=True))
+    await state.set_state(Reg.phone)
+
+
+@router.message(Reg.phone, F.contact)
+async def reg_phone(m: Message, state: FSMContext):
+    await state.update_data(phone=m.contact.phone_number)
+    await m.answer("Yashash manzilingiz (shahar/tuman):", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(Reg.address)
+
+
+@router.message(Reg.address, F.text)
+async def reg_address(m: Message, state: FSMContext):
+    await state.update_data(address=m.text.strip())
+    await m.answer("Yoshingiz (raqam bilan):")
+    await state.set_state(Reg.age)
+
+
+@router.message(Reg.age, F.text)
+async def reg_age(m: Message, state: FSMContext):
+    if not m.text.isdigit() or not 14 <= int(m.text) <= 80:
+        return await m.answer("Yoshni to'g'ri kiriting (14–80).")
+    await state.update_data(age=int(m.text))
+    await m.answer("Shaxsiy rasmingizni (selfi) yuboring 📷:")
+    await state.set_state(Reg.photo)
+
+
+@router.message(Reg.photo, F.photo)
+async def reg_photo(m: Message, state: FSMContext, bot: Bot):
+    d = await state.get_data()
+    file_id = m.photo[-1].file_id
+    q("INSERT OR REPLACE INTO users(id,name,surname,phone,address,age,photo,username) "
+      "VALUES(?,?,?,?,?,?,?,?)",
+      (m.from_user.id, d["name"], d["surname"], d["phone"], d["address"],
+       d["age"], file_id, m.from_user.username or ""), commit=True)
+    await state.clear()
+    await bot.send_photo(
+        ADMIN_ID, file_id,
+        caption=(f"🆕 <b>Yangi foydalanuvchi</b>\n\n👤 {esc(d['name'])} {esc(d['surname'])}\n"
+                 f"📞 {esc(d['phone'])}\n🏠 {esc(d['address'])}\n🎂 {d['age']} yosh\n"
+                 f"🆔 <code>{m.from_user.id}</code>\n"
+                 f"🔗 @{esc(m.from_user.username or '—')}"))
+    await m.answer("✅ Ro'yxatdan o'tdingiz!", reply_markup=main_menu(m.from_user.id))
+    if m.from_user.id in pending_apply:
+        await begin_apply(m, state, pending_apply.pop(m.from_user.id))
+
+
+@router.message(F.text == "👤 Profilim")
+async def profile(m: Message):
+    u = get_user(m.from_user.id)
+    if not u:
+        return await m.answer("Avval /start bosing.")
+    await m.answer_photo(u["photo"], caption=(
+        f"👤 {esc(u['name'])} {esc(u['surname'])}\n📞 {esc(u['phone'])}\n"
+        f"🏠 {esc(u['address'])}\n🎂 {u['age']} yosh"))
+
+
+# ---------------------------------------------------------------- E'LON BERISH
+@router.message(F.text == "❌ Bekor qilish")
+async def cancel(m: Message, state: FSMContext):
+    await state.clear()
+    await m.answer("Bekor qilindi.", reply_markup=main_menu(m.from_user.id))
+
+
+@router.message(F.text == "📢 E'lon berish")
+async def ad_start(m: Message, state: FSMContext):
+    if not get_user(m.from_user.id):
+        return await m.answer("Avval /start bosib ro'yxatdan o'ting.")
+    await state.clear()
+    await m.answer("E'lon yaratamiz.", reply_markup=cancel_kb())
+    kb = inline([("☀️ Kunlik", "kind:Kunlik"), ("🗓 Oylik", "kind:Oylik")]).adjust(2)
+    await m.answer("💼 Ish turini tanlang:", reply_markup=kb.as_markup())
+    await state.set_state(Ad.kind)
+
+
+@router.callback_query(Ad.kind, F.data.startswith("kind:"))
+async def ad_kind(c: CallbackQuery, state: FSMContext):
+    await state.update_data(kind=c.data[5:])
+    kb = inline([(money(p), f"price:{p}") for p in PRICES]).adjust(3)
+    await c.message.edit_text("💰 Narxni tanlang (so'm):", reply_markup=kb.as_markup())
+    await state.set_state(Ad.price)
+
+
+@router.callback_query(Ad.price, F.data.startswith("price:"))
+async def ad_price(c: CallbackQuery, state: FSMContext):
+    await state.update_data(price=int(c.data[6:]))
+    kb = inline([("🕒 Ish vaqtini yozish", "time_go")])
+    await c.message.edit_text("Ish vaqti uchun tugmani bosing 👇", reply_markup=kb.as_markup())
+    await state.set_state(Ad.time)
+
+
+@router.callback_query(Ad.time, F.data == "time_go")
+async def ad_time_btn(c: CallbackQuery):
+    await c.message.edit_text("🕒 Ish vaqtini yozing (masalan: 09:00 – 18:00):")
+
+
+@router.message(Ad.time, F.text)
+async def ad_time(m: Message, state: FSMContext):
+    await state.update_data(time=m.text.strip())
+    kb = inline([("Bugunga", "when:Bugunga"), ("Hozirga", "when:Hozirga"),
+                 ("Ertaga", "when:Ertaga")]).adjust(3)
+    await m.answer("📅 Ish qachonga?", reply_markup=kb.as_markup())
+    await state.set_state(Ad.when)
+
+
+@router.callback_query(Ad.when, F.data.startswith("when:"))
+async def ad_when(c: CallbackQuery, state: FSMContext):
+    await state.update_data(when=c.data[5:])
+    await c.message.delete()
+    b = ReplyKeyboardBuilder()
+    b.add(KeyboardButton(text="📍 Geolokatsiya yuborish", request_location=True))
+    b.button(text="❌ Bekor qilish")
+    b.adjust(1)
+    await c.message.answer("📍 Ish manzilini geolokatsiya orqali yuboring:",
+                           reply_markup=b.as_markup(resize_keyboard=True))
+    await state.set_state(Ad.location)
+
+
+@router.message(Ad.location, F.location)
+async def ad_location(m: Message, state: FSMContext):
+    await state.update_data(lat=m.location.latitude, lon=m.location.longitude)
+    await m.answer("ℹ️ Qo'shimcha ma'lumot yozing (ish haqida, talablar...):",
+                   reply_markup=cancel_kb())
+    await state.set_state(Ad.extra)
+
+
+def ad_text(a):
+    return (f"📢 <b>YANGI ISH E'LONI</b>\n\n"
+            f"💼 Ish: <b>{esc(a['kind'])}</b>\n"
+            f"💰 Narxi: <b>{money(a['price'])} so'm</b>\n"
+            f"🕒 Ish vaqti: {esc(a['time'])}\n"
+            f"📅 Qachonga: <b>{esc(a['when'])}</b>\n"
+            f"📍 <a href=\"https://maps.google.com/?q={a['lat']},{a['lon']}\">Xaritada ko'rish</a>\n\n"
+            f"ℹ️ {esc(a['extra'])}")
+
+
+@router.message(Ad.extra, F.text)
+async def ad_extra(m: Message, state: FSMContext):
+    await state.update_data(extra=m.text.strip())
+    d = await state.get_data()
+    kb = inline([("✅ Tasdiqlash", "ad:ok"), ("❌ Bekor qilish", "ad:no")]).adjust(2)
+    await m.answer("Tekshiring:\n\n" + ad_text(d), reply_markup=kb.as_markup(),
+                   disable_web_page_preview=True)
+    await state.set_state(Ad.confirm)
+
+
+@router.callback_query(Ad.confirm, F.data == "ad:no")
+async def ad_no(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await c.message.edit_text("❌ E'lon bekor qilindi.")
+    await c.message.answer("Menyu:", reply_markup=main_menu(c.from_user.id))
+
+
+@router.callback_query(Ad.confirm, F.data == "ad:ok")
+async def ad_ok(c: CallbackQuery, state: FSMContext, bot: Bot):
+    d = await state.get_data()
+    ad_id = q("INSERT INTO ads(owner,kind,price,time,when_,lat,lon,extra) VALUES(?,?,?,?,?,?,?,?)",
+              (c.from_user.id, d["kind"], d["price"], d["time"], d["when"],
+               d["lat"], d["lon"], d["extra"]), commit=True)
+    kb = inline([]).as_markup()
+    b = InlineKeyboardBuilder()
+    b.button(text="✍️ Ishga yozilish", url=f"https://t.me/{BOT_USERNAME}?start=apply_{ad_id}")
+    msg = await bot.send_message(CHANNEL_ID, ad_text(d) + f"\n\n🆔 #{ad_id}",
+                                 reply_markup=b.as_markup(), disable_web_page_preview=True)
+    q("UPDATE ads SET msg_id=? WHERE id=?", (msg.message_id, ad_id), commit=True)
+    await state.clear()
+    await c.message.edit_text(f"✅ E'lon kanalga joylandi! (#{ad_id})")
+    await c.message.answer("Menyu:", reply_markup=main_menu(c.from_user.id))
+    await bot.send_message(ADMIN_ID, f"📢 Yangi e'lon #{ad_id} joylandi. Egasi: <code>{c.from_user.id}</code>")
+
+
+# ---------------------------------------------------------------- ISHGA YOZILISH
+async def begin_apply(m: Message, state: FSMContext, ad_id: int):
+    ad = q("SELECT * FROM ads WHERE id=?", (ad_id,), one=True)
+    if not ad or ad["status"] != "active":
+        return await m.answer("Bu e'lon topilmadi yoki yopilgan.", reply_markup=main_menu(m.chat.id))
+    if ad["owner"] == m.chat.id:
+        return await m.answer("O'z e'loningizga yozila olmaysiz.", reply_markup=main_menu(m.chat.id))
+    if q("SELECT 1 FROM apps WHERE ad_id=? AND user_id=? AND status!='rejected'",
+         (ad_id, m.chat.id), one=True):
+        return await m.answer("Siz bu ishga allaqachon yozilgansiz.", reply_markup=main_menu(m.chat.id))
+    await state.set_state(Apply.shot1)
+    await state.update_data(ad_id=ad_id)
+    await m.answer(f"✍️ E'lon #{ad_id} ga yozilish.\n\n"
+                   "1️⃣ Bormoqchi bo'lgan <b>ish joyingiz</b> skrinshotini yuboring:",
+                   reply_markup=cancel_kb())
+
+
+@router.message(Apply.shot1, F.photo)
+async def apply_shot1(m: Message, state: FSMContext):
+    await state.update_data(shot1=m.photo[-1].file_id)
+    await m.answer("2️⃣ Endi hozir <b>turgan joyingiz</b> skrinshotini yuboring:")
+    await state.set_state(Apply.shot2)
+
+
+@router.message(Apply.shot2, F.photo)
+async def apply_shot2(m: Message, state: FSMContext, bot: Bot):
+    d = await state.get_data()
+    app_id = q("INSERT INTO apps(ad_id,user_id,shot1,shot2) VALUES(?,?,?,?)",
+               (d["ad_id"], m.from_user.id, d["shot1"], m.photo[-1].file_id), commit=True)
+    await state.clear()
+    u = get_user(m.from_user.id)
+    await bot.send_media_group(ADMIN_ID, [
+        InputMediaPhoto(media=d["shot1"], caption=f"📝 Ariza #{app_id} — ish joyi"),
+        InputMediaPhoto(media=m.photo[-1].file_id, caption="Ariza beruvchining joyi")])
+    kb = inline([("✅ Tasdiqlash", f"ap:ok:{app_id}"), ("❌ Rad etish", f"ap:no:{app_id}")]).adjust(2)
+    await bot.send_message(
+        ADMIN_ID, f"📝 <b>Ariza #{app_id}</b> (e'lon #{d['ad_id']})\n"
+                  f"👤 {esc(u['name'])} {esc(u['surname'])}, {u['age']} yosh\n"
+                  f"📞 {esc(u['phone'])}\n🏠 {esc(u['address'])}",
+        reply_markup=kb.as_markup())
+    await m.answer("⏳ Arizangiz adminga yuborildi. Tasdiqlashni kuting.",
+                   reply_markup=main_menu(m.from_user.id))
+
+
+@router.callback_query(F.from_user.id == ADMIN_ID, F.data.startswith("ap:"))
+async def admin_app(c: CallbackQuery, bot: Bot):
+    _, act, app_id = c.data.split(":")
+    app = q("SELECT * FROM apps WHERE id=?", (app_id,), one=True)
+    if not app or app["status"] != "new":
+        return await c.answer("Allaqachon ko'rib chiqilgan.", show_alert=True)
+    if act == "ok":
+        q("UPDATE apps SET status='awaiting_pay' WHERE id=?", (app_id,), commit=True)
+        await bot.send_message(
+            app["user_id"],
+            f"✅ Arizangiz tasdiqlandi!\n\n💳 To'lov kartasi:\n<code>{esc(setting('card'))}</code>\n"
+            f"💵 Summa: <b>{esc(setting('fee'))} so'm</b>\n\n"
+            "To'lov qilgach, <b>chek rasmini</b> shu yerga yuboring 📸")
+        await c.message.edit_text(c.message.text + "\n\n✅ Tasdiqlandi")
     else:
-      bot.send_message(
-          int(target_user_id),
-          f"⚠️ OGOHLANTIRISH!\n\nSiz yuborgan chek soxta deb topildi. Ogohlantirish: {warn_count}/3",
-          parse_mode="Markdown",
-      )
-      bot.edit_message_caption(
-          call.message.caption
-          + f"\n\n⚠️ OGOHLANTIRISH BERILDI ({warn_count}/3)",
-          call.message.chat.id,
-          call.message.message_id,
-      )
-    save_data("users.json", users_db)
+        q("UPDATE apps SET status='rejected' WHERE id=?", (app_id,), commit=True)
+        await bot.send_message(app["user_id"], "❌ Afsus, arizangiz rad etildi.")
+        await c.message.edit_text(c.message.text + "\n\n❌ Rad etildi")
 
 
-# --- 5. ADMIN ORQALI KANALGA E'LON JOYLAH ---
-@bot.message_handler(commands=["post"])
-def create_post(message):
-  if message.from_user.id != ADMIN_ID:
-    return
-  msg = (
-      "📝 E'lon joylash formati:\n\n"
-      "Ish haqqi | Ovqat | Vaqt | Manzil | Qo'shimcha | Ish beruvchi tel\n\n"
-      "Namuna:\n"
-      "200 000 | Bor | 08:00 - 18:00 | Yunusobod 4-mavze | Usta yordamchisi kerak | +998901234567"
-  )
-  bot.reply_to(message, msg, parse_mode="Markdown")
+@router.message(StateFilter(None), F.photo)
+async def receipt(m: Message, bot: Bot):
+    app = q("SELECT * FROM apps WHERE user_id=? AND status='awaiting_pay' ORDER BY id DESC",
+            (m.from_user.id,), one=True)
+    if not app:
+        return
+    q("UPDATE apps SET receipt=?, status='paid_check' WHERE id=?",
+      (m.photo[-1].file_id, app["id"]), commit=True)
+    kb = inline([("✅ To'lov keldi", f"pay:ok:{app['id']}"),
+                 ("❌ Yo'q", f"pay:no:{app['id']}")]).adjust(2)
+    await bot.send_photo(ADMIN_ID, m.photo[-1].file_id,
+                         caption=f"🧾 Ariza #{app['id']} to'lov cheki\n🆔 <code>{m.from_user.id}</code>",
+                         reply_markup=kb.as_markup())
+    await m.answer("⏳ Chek adminga yuborildi. Tekshirilgach xabar beramiz.")
 
 
-@bot.message_handler(
-    func=lambda msg: "|" in msg.text
-    and not msg.text.startswith("/")
-    and msg.from_user.id == ADMIN_ID
-)
-def handle_new_job_post(message):
-    try:
-        data = [item.strip() for item in message.text.split("|")]
-        if len(data) < 6:
-            bot.reply_to(
-                message,
-                "❌ Format noto'g'ri! Ma'lumotlarni to'g'ri kiriting."
-            )
-            return
-
-        post_id = str(int(time.time()))[-4:]
-        posts_db[post_id] = {
-            "ish_haqqi": data[0],
-            "ovqat": data[1],
-            "vaqt": data[2],
-            "manzil": data[3],
-            "qoshimcha": data[4],
-            "phone": data[5],
-        }
-        save_data("posts.json", posts_db)
-
-        caption = (
-            f"👷‍♂️ Ishchilar kanali\n\n"
-            f"💰 Ish haqqi: {data[0]} so'm\n"
-            f"🍲 Ovqat: {data[1]}\n"
-            f"⏰ Vaqt: {data[2]}\n"
-            f"📍 Manzil: {data[3]}\n"
-            f"⭐️ Xizmat haqqi: {XIZMAT_HAQQI} so'm\n"
-            f"📝 Qo'shimcha: {data[4]}\n\n"
-            f"🟢 Holat: Faol\n№ {post_id}"
-        )
-
-        keyboard = types.InlineKeyboardMarkup()
-        keyboard.add(
-            types.InlineKeyboardButton(
-                "📝 Ishga yozilish",
-                url=f"https://t.me/{BOT_USERNAME}?start=apply_{post_id}"
-            )
-        )
-
-        bot.send_message(
-            CHANNEL_ID,
-            caption,
-            reply_markup=keyboard
-        )
-
-    except Exception as e:
-        print(f"Xatolik: {e}")
-
-        caption = (
-        f"👷‍♂️ Ishchilar kanali\n\n💰 Ish haqqi: {data[0]} so'm\n"
-        f"🍲 Ovqat: {data[1]}\n⏰ Vaqt: {data[2]}\n📍 Manzil: {data[3]}\n"
-        f"⭐️ Xizmat haqqi: {XIZMAT_HAQQI} so'm\n📝 Qo'shimcha: {data[4]}\n\n🟢 Holat: Faol\n№ {post_id}"
-        )
-
-    keyboard = types.InlineKeyboardMarkup()
-    keyboard.add(
-        types.InlineKeyboardButton(
-            "📝 Ishga yozilish",
-            url=f"https://t.me/{BOT_USERNAME}?start=job_{post_id}",
-        )
-    )
-
-    bot.send_message(
-        CHANNEL_ID, caption, reply_markup=keyboard, parse_mode="Markdown"
-    )
-    bot.reply_to(message, f"✅ E'lon {CHANNEL_ID} ga joylandi! (ID: #{post_id})")
-  except Exception as e:
-    bot.reply_to(message, f"❌ Xatolik yuz berdi: {e}")
+@router.callback_query(F.from_user.id == ADMIN_ID, F.data.startswith("pay:"))
+async def admin_pay(c: CallbackQuery, bot: Bot):
+    _, act, app_id = c.data.split(":")
+    app = q("SELECT * FROM apps WHERE id=?", (app_id,), one=True)
+    if not app or app["status"] != "paid_check":
+        return await c.answer("Allaqachon ko'rib chiqilgan.", show_alert=True)
+    if act == "ok":
+        q("UPDATE apps SET status='paid' WHERE id=?", (app_id,), commit=True)
+        ad = q("SELECT * FROM ads WHERE id=?", (app["ad_id"],), one=True)
+        owner = get_user(ad["owner"])
+        worker = get_user(app["user_id"])
+        await bot.send_message(
+            app["user_id"],
+            f"✅ To'lov tasdiqlandi!\n\n📌 E'lon #{ad['id']} egasi:\n"
+            f"👤 {esc(owner['name'])} {esc(owner['surname'])}\n📞 {esc(owner['phone'])}\n"
+            f"📍 <a href=\"https://maps.google.com/?q={ad['lat']},{ad['lon']}\">Ish manzili</a>")
+        await bot.send_message(
+            ad["owner"],
+            f"🙋 E'loningiz #{ad['id']} bo'yicha ishchi topildi:\n"
+            f"👤 {esc(worker['name'])} {esc(worker['surname'])}, {worker['age']} yosh\n"
+            f"📞 {esc(worker['phone'])}")
+        await bot.send_photo(ad["owner"], worker["photo"])
+        await c.message.edit_caption(caption=c.message.caption + "\n\n✅ Tasdiqlandi")
+    else:
+        q("UPDATE apps SET status='awaiting_pay' WHERE id=?", (app_id,), commit=True)
+        await bot.send_message(app["user_id"], "❌ To'lov tasdiqlanmadi. To'g'ri chekni qayta yuboring.")
+        await c.message.edit_caption(caption=c.message.caption + "\n\n❌ Rad etildi")
 
 
-print("Master_rabotnikbot muvaffaqiyatli ishga tushdi!")
-bot.polling(non_stop=True)
-@bot.message_handler(commands=['post'])
-def create_post(message):
-  if message.from_user.id != ADMIN_ID:
-    return
-  msg = (
-      "📝 Yangilangan e'lon joylash formati:\n\n"
-      "Ish haqqi | Ovqat | Vaqt | Manzil | Xizmat haqi | Sana | Qo'shimcha | Ish beruvchi tel\n\n"
-      "Siz xohlagan namuna:\n"
-      "150 mingdan | 1 mahal | 10:00 dan ish tugaguncha | Lakatsiya beriladi | 0 so'm | Ertaga | Padez uborkasi 2 ta ayol qiz kerak Yaxshi ishlaydigan | +998901234567"
-  )
-  bot.reply_to(message, msg, parse_mode="Markdown")
+# ---------------------------------------------------------------- ADMIN PANEL
+def admin_kb():
+    return inline([
+        ("📊 Statistika", "adm:stats"), ("👥 Foydalanuvchilar", "adm:users"),
+        ("📢 E'lonlar", "adm:ads"), ("📝 Yangi arizalar", "adm:apps"),
+        ("💳 Karta raqami", "adm:card"), ("💵 To'lov summasi", "adm:fee"),
+        ("📨 Xabar yuborish", "adm:bc"), ("🚫 Bloklash", "adm:ban"),
+        ("♻️ Blokdan chiqarish", "adm:unban"),
+    ]).adjust(2)
 
 
-@bot.message_handler(
-    func=lambda msg: "|" in msg.text
-    and not msg.text.startswith("/")
-    and msg.from_user.id == ADMIN_ID
-)
-def handle_new_job_post(message):
-  try:
-    data = [item.strip() for item in message.text.split("|")]
-    if len(data) < 8:
-      bot.reply_to(
-          message,
-          "❌ Format noto'g'ri! Ma'lumotlarni 8 ta qismga | belgisida ajratib yozing.",
-      )
-      return
+@router.message(F.from_user.id == ADMIN_ID, F.text == "🛠 Admin panel")
+async def admin_panel(m: Message, state: FSMContext):
+    await state.clear()
+    await m.answer("🛠 <b>Admin panel</b>", reply_markup=admin_kb().as_markup())
 
-    post_id = str(int(time.time()))[-4:]
-    posts_db[post_id] = {
-        "ish_haqqi": data[0],
-        "ovqat": data[1],
-        "vaqt": data[2],
-        "manzil": data[3],
-        "xizmat_haqi": data[4],
-        "sana": data[5],
-        "qoshimcha": data[6],
-        "phone": data[7],
-    }
-    save_data("posts.json", posts_db)
 
-    caption = (
-        f"💰 Ish haqqi: {data[0]}\n"
-        f"🍛 Ovqat: {data[1]}\n"
-        f"⏰ Vaqt: {data[2]}\n"
-        f"📱 Manzil: {data[3]}\n"
-        f"🌟 Xizmat haqi: {data[4]}\n"
-        f"📝 Qo'shimcha: {data[6]}\n\n"
-        f"🟢 Holat: Faol\n"
-        f"📅 Sana: {data[5]}\n"
-        f"#{post_id}"
-    )
-
-    keyboard = types.InlineKeyboardMarkup()
-    keyboard.add(
-        types.InlineKeyboardButton(
-            "📝 Ishga yozilish",
-            url=f"https://t.me/{BOT_USERNAME}?start=job_{post_id}",
-        )
-    )
-
-    bot.send_message(
-        CHANNEL_ID, caption, reply_markup=keyboard, parse_mode="Markdown"
-    )
-    bot.reply_to(message, f"✅ E'lon {CHANNEL_ID} ga joylandi! (ID: #{post_id})")
-  except Exception as e:
-    bot.reply_to(message, f"❌ Xatolik yuz berdi: {e}")
-      
+@router.callback_query(F.from_user.id == ADMIN_ID, F.data.startswith("adm:"))
+async def admin_cb(c: CallbackQuery, state: FSMContext):
+    act = c.data[4:]
+    await c.answer()
+    if act == "stats":
+        n = lambda s: q(s, one=True)[0]
+        await c.message.answer(
+            f"📊 Foydalanuvchilar: {n('SELECT COUNT(*) FROM users')}\n"
+            f"🚫 Bloklangan: {n('SELECT COUNT(*) FROM users WHERE banned=1')}\n"
+            f"📢 E'lonlar: {n('SELECT COUNT(*) FROM ads')}\n"
+            f"📝 Arizalar: {n('SELECT COUNT(*) FROM apps')}\n"
+            f"✅ To'langan: {n(chr(83)+'ELECT COUNT(*) FROM apps WHER
