@@ -14,6 +14,7 @@ import logging
 import os
 import sqlite3
 
+from aiohttp import web
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.filters import CommandObject, CommandStart, StateFilter
 from aiogram.enums import ParseMode
@@ -479,3 +480,117 @@ async def admin_cb(c: CallbackQuery, state: FSMContext):
         text += "\n📝 Arizalar: " + str(total_apps)
         text += "\n✅ To'langan: " + str(paid)
         await c.message.answer(text)
+    elif act == "users":
+        rows = q("SELECT * FROM users ORDER BY rowid DESC LIMIT 20")
+        t = "\n".join(f"<code>{r['id']}</code> {esc(r['name'])} {esc(r['surname'])} {esc(r['phone'])}"
+                      f"{' 🚫' if r['banned'] else ''}" for r in rows) or "Yo'q"
+        await c.message.answer("👥 Oxirgi 20 ta:\n\n" + t)
+    elif act == "ads":
+        rows = q("SELECT * FROM ads ORDER BY id DESC LIMIT 10")
+        if not rows:
+            return await c.message.answer("E'lonlar yo'q.")
+        for r in rows:
+            kb = inline([("🔒 Yopish", f"adclose:{r['id']}")]) if r["status"] == "active" else None
+            await c.message.answer(
+                f"#{r['id']} | {r['kind']} | {money(r['price'])} | {r['when_']} | {r['status']}",
+                reply_markup=kb.as_markup() if kb else None)
+    elif act == "apps":
+        rows = q("SELECT * FROM apps WHERE status IN ('new','paid_check') ORDER BY id DESC LIMIT 20")
+        await c.message.answer("\n".join(f"Ariza #{r['id']} — {r['status']}" for r in rows)
+                               or "Kutilayotgan arizalar yo'q.")
+    elif act in ("card", "fee"):
+        await state.set_state(Adm.setting)
+        await state.update_data(key=act)
+        await c.message.answer("Yangi qiymatni yozing:" if act == "fee"
+                               else "Yangi karta raqami (va egasi ismini) yozing:")
+    elif act == "bc":
+        await state.set_state(Adm.broadcast)
+        await c.message.answer("Hammaga yuboriladigan xabarni yozing:")
+    elif act == "ban":
+        await state.set_state(Adm.ban)
+        await c.message.answer("Bloklanadigan foydalanuvchi ID sini yozing:")
+    elif act == "unban":
+        await state.set_state(Adm.unban)
+        await c.message.answer("Blokdan chiqariladigan ID ni yozing:")
+
+
+@router.callback_query(F.from_user.id == ADMIN_ID, F.data.startswith("adclose:"))
+async def ad_close(c: CallbackQuery, bot: Bot):
+    ad_id = int(c.data.split(":")[1])
+    ad = q("SELECT * FROM ads WHERE id=?", (ad_id,), one=True)
+    q("UPDATE ads SET status='closed' WHERE id=?", (ad_id,), commit=True)
+    try:
+        await bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=ad["msg_id"], reply_markup=None)
+        await bot.edit_message_text(chat_id=CHANNEL_ID, message_id=ad["msg_id"],
+                                    text=f"❌ E'lon #{ad_id} yopildi.")
+    except Exception as e:
+        logging.warning(e)
+    await c.message.edit_text(f"#{ad_id} yopildi 🔒")
+
+
+@router.message(F.from_user.id == ADMIN_ID, Adm.setting, F.text)
+async def adm_setting(m: Message, state: FSMContext):
+    d = await state.get_data()
+    q("UPDATE settings SET v=? WHERE k=?", (m.text.strip(), d["key"]), commit=True)
+    await state.clear()
+    await m.answer("✅ Saqlandi.")
+
+
+@router.message(F.from_user.id == ADMIN_ID, Adm.broadcast, F.text)
+async def adm_bc(m: Message, state: FSMContext, bot: Bot):
+    await state.clear()
+    ok = 0
+    for r in q("SELECT id FROM users WHERE banned=0"):
+        try:
+            await bot.send_message(r["id"], m.text)
+            ok += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            pass
+    await m.answer(f"📨 Yuborildi: {ok}")
+
+
+@router.message(F.from_user.id == ADMIN_ID, Adm.ban, F.text)
+async def adm_ban(m: Message, state: FSMContext):
+    await state.clear()
+    if m.text.strip().isdigit():
+        q("UPDATE users SET banned=1 WHERE id=?", (int(m.text),), commit=True)
+        await m.answer("🚫 Bloklandi.")
+
+
+@router.message(F.from_user.id == ADMIN_ID, Adm.unban, F.text)
+async def adm_unban(m: Message, state: FSMContext):
+    await state.clear()
+    if m.text.strip().isdigit():
+        q("UPDATE users SET banned=0 WHERE id=?", (int(m.text),), commit=True)
+        await m.answer("♻️ Blokdan chiqarildi.")
+
+
+# ---------------------------------------------------------------- RUN
+async def health(request):
+    return web.Response(text="Bot ishlayapti")
+
+
+async def start_web():
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", "10000")))
+    await site.start()
+
+
+async def main():
+    global BOT_USERNAME
+    await start_web()
+    logging.basicConfig(level=logging.INFO)
+    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    BOT_USERNAME = (await bot.get_me()).username
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.update.outer_middleware(BanMiddleware())
+    dp.include_router(router)
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
