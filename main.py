@@ -1052,18 +1052,22 @@ async def start_web():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", "10000")))
     await site.start()
-
+    return runner
 
 async def main():
     global BOT_USERNAME
     logging.basicConfig(level=logging.INFO)
-    await start_web()
+    runner = await start_web()
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    BOT_USERNAME = (await bot.get_me()).username
-    dp = Dispatcher(storage=MemoryStorage())
-    dp.update.outer_middleware(BanMiddleware())
-    dp.include_router(router)
-    await dp.start_polling(bot)
+    try:
+        BOT_USERNAME = (await bot.get_me()).username
+        dp = Dispatcher(storage=MemoryStorage())
+        dp.update.outer_middleware(BanMiddleware())
+        dp.include_router(router)
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+        await runner.cleanup()
 
 
 if __name__ == "__main__":
