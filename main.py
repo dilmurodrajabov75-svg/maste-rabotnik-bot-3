@@ -449,13 +449,11 @@ def ad_text(a, ad_id=None, status=None):
 
 def ad_status(r):
     """Kanal e'loni tagidagi holat matni va 'Ishga yozilish' tugmasi kerakmi."""
-    taken = taken_count(r["id"])
+    taken = reserved_count(r["id"])
     people = r["people"] or 1
-    if r["status"] == "closed":
-        return ("odam olindi" if taken else "odam olinmadi"), False
-    if taken >= people:
-        return "odam olindi ✅", False
-    return f"odam olinmadi ({taken}/{people})", True
+    if r["status"] == "closed" or taken >= people:
+        return "joy to'ldi", False
+    return "joy bor", True
 
 
 def apply_kb(ad_id):
