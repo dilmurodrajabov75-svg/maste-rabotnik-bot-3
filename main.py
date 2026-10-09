@@ -11,6 +11,7 @@ import html
 import logging
 import re
 import sqlite3
+import time
 
 from aiohttp import web
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
@@ -25,7 +26,7 @@ from aiogram.types import (CallbackQuery, InputMediaPhoto, KeyboardButton,
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 import os
 
-BOT_TOKEN = "8350987756:AAEDpSMmC83_UbEafttGeMDo0t4nq1kdoUM"
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = 8554402317          # BOSH ADMIN
 CHANNEL_ID = "@ish_keremidi"
 
@@ -55,13 +56,21 @@ CREATE TABLE IF NOT EXISTS admin_cards(
 CREATE TABLE IF NOT EXISTS topups(
   id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount INTEGER,
   status TEXT DEFAULT 'new');
+CREATE TABLE IF NOT EXISTS ratings(
+  user_id INTEGER, app_id INTEGER, score INTEGER, role TEXT, ts INTEGER,
+  PRIMARY KEY(user_id, app_id));
 INSERT OR IGNORE INTO settings VALUES('card','Karta raqami kiritilmagan');
 INSERT OR IGNORE INTO settings VALUES('fee','10000');
 """)
 db.commit()
 for _stmt in ("ALTER TABLE users ADD COLUMN balance INTEGER DEFAULT 0",
               "ALTER TABLE ads ADD COLUMN card TEXT DEFAULT ''",
-              "ALTER TABLE apps ADD COLUMN paid_by TEXT DEFAULT ''"):
+              "ALTER TABLE ads ADD COLUMN people INTEGER DEFAULT 1",
+              "ALTER TABLE ads ADD COLUMN addr TEXT DEFAULT ''",
+              "ALTER TABLE ads ADD COLUMN contact TEXT DEFAULT ''",
+              "ALTER TABLE apps ADD COLUMN paid_by TEXT DEFAULT ''",
+              "ALTER TABLE apps ADD COLUMN ts INTEGER DEFAULT 0",
+              "ALTER TABLE apps ADD COLUMN go TEXT DEFAULT ''"):
     try:
         db.execute(_stmt)
         db.commit()
@@ -133,6 +142,7 @@ class Reg(StatesGroup):
 
 class Ad(StatesGroup):
     kind = State(); price = State(); time = State(); when = State()
+    people = State(); addr = State(); contact = State()
     location = State(); extra = State(); card = State(); confirm = State()
 
 
@@ -170,11 +180,12 @@ class BanMiddleware(BaseMiddleware):
 # ---------------------------------------------------------------- Klaviaturalar
 def main_menu(uid):
     b = ReplyKeyboardBuilder()
-    for t in ("📢 E'lon berish", "💰 Hisobim", "📞 Admin bilan bog'lanish", "👤 Profilim"):
+    for t in ("📢 E'lon berish", "📋 Mening ishlarim", "💰 Hisobim", "⭐ Baholar",
+              "📞 Admin bilan bog'lanish", "👤 Profilim"):
         b.button(text=t)
     if is_admin(uid):
         b.button(text="🛠 Admin panel")
-    b.adjust(2, 2, 1)
+    b.adjust(2, 2, 2, 1)
     return b.as_markup(resize_keyboard=True)
 
 
@@ -252,12 +263,15 @@ async def reg_age(m: Message, state: FSMContext):
     if not m.text.isdigit() or not 14 <= int(m.text) <= 80:
         return await m.answer("Yoshni to'g'ri kiriting (14–80).")
     await state.update_data(age=int(m.text))
-    await m.answer("Shaxsiy rasmingizni (selfi) yuboring 📷:")
+    await m.answer("Shaxsiy rasmingizni yuboring 📷\n\n❗️ Hozir <b>old (selfi) kamera</b> bilan o'zingizni rasmga olib yuboring. "
+                   "Galereyadan, uzatilgan yoki boshqa odamning rasmi qabul qilinmaydi.")
     await state.set_state(Reg.photo)
 
 
 @router.message(Reg.photo, F.photo)
 async def reg_photo(m: Message, state: FSMContext, bot: Bot):
+    if getattr(m, "forward_origin", None) or getattr(m, "forward_date", None):
+        return await m.answer("❌ Uzatilgan rasm qabul qilinmaydi. O'zingizni old kamerada rasmga olib yuboring 📷")
     d = await state.get_data()
     file_id = m.photo[-1].file_id
     q("INSERT OR REPLACE INTO users(id,name,surname,phone,address,age,photo,username) "
@@ -395,6 +409,140 @@ async def reply_send(m: Message, state: FSMContext, bot: Bot):
 
 
 # ---------------------------------------------------------------- E'LON BERISH
+def row_dict(r):
+    d = dict(r)
+    d["when"] = d.get("when_")
+    return d
+
+
+def taken_count(ad_id):
+    return q("SELECT COUNT(*) FROM apps WHERE ad_id=? AND status='paid'", (ad_id,), one=True)[0]
+
+
+def reserved_count(ad_id):
+    return q("SELECT COUNT(*) FROM apps WHERE ad_id=? AND status IN "
+             "('awaiting_pay','paid_check','paid')", (ad_id,), one=True)[0]
+
+
+def ad_text(a, ad_id=None, status=None):
+    lat, lon = a.get("lat"), a.get("lon")
+    if lat is not None and lon is not None:
+        place = f"📍 <a href=\"https://maps.google.com/?q={lat},{lon}\">Xaritada ko'rish</a>"
+        if a.get("addr"):
+            place += f"\n🏠 {esc(a['addr'])}"
+    else:
+        place = f"📍 Manzil: <b>{esc(a.get('addr') or '—')}</b>"
+    t = (f"📢 <b>YANGI ISH E'LONI</b>\n\n"
+         f"💼 Ish: <b>{esc(a['kind'])}</b>\n"
+         f"💰 Narxi: <b>{money(a['price'])} so'm</b>\n"
+         f"👥 Odam soni: <b>{a.get('people') or 1}</b>\n"
+         f"🕒 Ish vaqti: {esc(a['time'])}\n"
+         f"📅 Qachonga: <b>{esc(a['when'])}</b>\n"
+         f"{place}\n\n"
+         f"ℹ️ {esc(a['extra'])}")
+    if ad_id:
+        t += f"\n\n🆔 #{ad_id}"
+    if status:
+        t += f"\n\n📌 Holat: <b>{status}</b>"
+    return t
+
+
+def ad_status(r):
+    """Kanal e'loni tagidagi holat matni va 'Ishga yozilish' tugmasi kerakmi."""
+    taken = taken_count(r["id"])
+    people = r["people"] or 1
+    if r["status"] == "closed":
+        return ("odam olindi" if taken else "odam olinmadi"), False
+    if taken >= people:
+        return "odam olindi ✅", False
+    return f"odam olinmadi ({taken}/{people})", True
+
+
+def apply_kb(ad_id):
+    b = InlineKeyboardBuilder()
+    b.button(text="✍️ Ishga yozilish", url=f"https://t.me/{BOT_USERNAME}?start=apply_{ad_id}")
+    return b.as_markup()
+
+
+async def post_to_channel(bot, ad_id):
+    r = q("SELECT * FROM ads WHERE id=?", (ad_id,), one=True)
+    st, btn = ad_status(r)
+    msg = await bot.send_message(CHANNEL_ID, ad_text(row_dict(r), ad_id, st),
+                                 reply_markup=apply_kb(ad_id) if btn else None,
+                                 disable_web_page_preview=True)
+    q("UPDATE ads SET msg_id=?, status='active' WHERE id=?", (msg.message_id, ad_id), commit=True)
+
+
+async def refresh_channel(bot, ad_id):
+    """E'lon kanalda qoladi, faqat tagidagi holat yangilanadi."""
+    r = q("SELECT * FROM ads WHERE id=?", (ad_id,), one=True)
+    if not r or not r["msg_id"] or r["status"] in ("pending", "rejected"):
+        return
+    st, btn = ad_status(r)
+    try:
+        await bot.edit_message_text(chat_id=CHANNEL_ID, message_id=r["msg_id"],
+                                    text=ad_text(row_dict(r), ad_id, st),
+                                    reply_markup=apply_kb(ad_id) if btn else None,
+                                    disable_web_page_preview=True)
+    except Exception as e:
+        logging.warning(e)
+
+
+def all_admin_ids():
+    ids = [ADMIN_ID] + [r["id"] for r in q("SELECT id FROM admins")]
+    return list(dict.fromkeys(ids))
+
+
+adv_msgs = {}
+
+
+async def send_for_approval(bot, ad_id):
+    r = q("SELECT * FROM ads WHERE id=?", (ad_id,), one=True)
+    owner = get_user(r["owner"])
+    text = ("🆕 <b>E'lonni tasdiqlash so'rovi</b>\n"
+            f"👤 {esc(owner['name'])} {esc(owner['surname'])} | 🆔 <code>{owner['id']}</code>\n\n"
+            + ad_text(row_dict(r), ad_id))
+    kb = inline([("✅ Tasdiqlash", f"adv:ok:{ad_id}"), ("❌ Rad etish", f"adv:no:{ad_id}")])
+    sent = []
+    for aid in all_admin_ids():
+        try:
+            m = await bot.send_message(aid, text, reply_markup=kb, disable_web_page_preview=True)
+            sent.append((aid, m.message_id))
+        except Exception as e:
+            logging.warning(e)
+    adv_msgs[ad_id] = sent
+
+
+@router.callback_query(ADM, F.data.startswith("adv:"))
+async def ad_review(c: CallbackQuery, bot: Bot):
+    _, act, ad_id = c.data.split(":")
+    ad_id = int(ad_id)
+    r = q("SELECT * FROM ads WHERE id=?", (ad_id,), one=True)
+    if not r or r["status"] != "pending":
+        return await c.answer("Allaqachon ko'rib chiqilgan.", show_alert=True)
+    who = esc(c.from_user.full_name)
+    if act == "ok":
+        q("UPDATE ads SET status='active' WHERE id=?", (ad_id,), commit=True)
+        await post_to_channel(bot, ad_id)
+        note = f"✅ Tasdiqladi: {who}"
+        owner_msg = f"✅ E'loningiz #{ad_id} tasdiqlandi va kanalga joylandi."
+    else:
+        q("UPDATE ads SET status='rejected' WHERE id=?", (ad_id,), commit=True)
+        note = f"❌ Rad etdi: {who}"
+        owner_msg = f"❌ E'loningiz #{ad_id} rad etildi."
+    try:
+        await bot.send_message(r["owner"], owner_msg)
+    except Exception:
+        pass
+    for aid, mid in adv_msgs.pop(ad_id, []):
+        try:
+            await bot.edit_message_reply_markup(chat_id=aid, message_id=mid, reply_markup=None)
+        except Exception:
+            pass
+    await append_note(c.message, note)
+    await c.answer()
+
+
 @router.message(F.text == "📢 E'lon berish")
 async def ad_start(m: Message, state: FSMContext):
     if not get_user(m.from_user.id):
@@ -417,6 +565,14 @@ async def ad_kind(c: CallbackQuery, state: FSMContext):
 @router.callback_query(Ad.price, F.data.startswith("price:"))
 async def ad_price(c: CallbackQuery, state: FSMContext):
     await state.update_data(price=int(c.data[6:]))
+    kb = inline([(str(i), f"ppl:{i}") for i in range(1, 16)], 5)
+    await c.message.edit_text("👥 Nechta odam kerak? Tugmani bosing:", reply_markup=kb)
+    await state.set_state(Ad.people)
+
+
+@router.callback_query(Ad.people, F.data.startswith("ppl:"))
+async def ad_people(c: CallbackQuery, state: FSMContext):
+    await state.update_data(people=int(c.data[4:]))
     await c.message.edit_text("Ish vaqti uchun tugmani bosing 👇",
                               reply_markup=inline([("🕒 Ish vaqtini yozish", "time_go")], 1))
     await state.set_state(Ad.time)
@@ -441,54 +597,79 @@ async def ad_when(c: CallbackQuery, state: FSMContext):
     await c.message.delete()
     b = ReplyKeyboardBuilder()
     b.add(KeyboardButton(text="📍 Geolokatsiya yuborish", request_location=True))
+    text = "📍 Ish manzilini geolokatsiya orqali yuboring:"
+    if is_admin(c.from_user.id):
+        b.button(text="✏️ Manzilni yozish")
+        text = "📍 Geolokatsiya yuboring yoki «✏️ Manzilni yozish» ni bosing:"
     b.button(text="❌ Bekor qilish")
     b.adjust(1)
-    await c.message.answer("📍 Ish manzilini geolokatsiya orqali yuboring:",
-                           reply_markup=b.as_markup(resize_keyboard=True))
+    await c.message.answer(text, reply_markup=b.as_markup(resize_keyboard=True))
     await state.set_state(Ad.location)
 
 
-@router.message(Ad.location, F.location)
-async def ad_location(m: Message, state: FSMContext):
-    await state.update_data(lat=m.location.latitude, lon=m.location.longitude)
+async def ask_extra(m, state):
     await m.answer("ℹ️ Qo'shimcha ma'lumot yozing (ish haqida, talablar...):", reply_markup=cancel_kb())
     await state.set_state(Ad.extra)
 
 
-def ad_text(a):
-    return (f"📢 <b>YANGI ISH E'LONI</b>\n\n"
-            f"💼 Ish: <b>{esc(a['kind'])}</b>\n"
-            f"💰 Narxi: <b>{money(a['price'])} so'm</b>\n"
-            f"🕒 Ish vaqti: {esc(a['time'])}\n"
-            f"📅 Qachonga: <b>{esc(a['when'])}</b>\n"
-            f"📍 <a href=\"https://maps.google.com/?q={a['lat']},{a['lon']}\">Xaritada ko'rish</a>\n\n"
-            f"ℹ️ {esc(a['extra'])}")
+@router.message(Ad.location, F.location)
+async def ad_location(m: Message, state: FSMContext):
+    await state.update_data(lat=m.location.latitude, lon=m.location.longitude, addr="")
+    await ask_extra(m, state)
+
+
+@router.message(Ad.location, ADM, F.text == "✏️ Manzilni yozish")
+async def ad_addr_start(m: Message, state: FSMContext):
+    await state.set_state(Ad.addr)
+    await m.answer("✏️ Ish manzilini yozing (shahar, ko'cha, mo'ljal):", reply_markup=cancel_kb())
+
+
+@router.message(Ad.addr, F.text)
+async def ad_addr(m: Message, state: FSMContext):
+    await state.update_data(lat=None, lon=None, addr=m.text.strip())
+    await ask_extra(m, state)
 
 
 async def show_preview(m, state):
     d = await state.get_data()
     kb = inline([("✅ Tasdiqlash", "ad:ok"), ("❌ Bekor qilish", "ad:no")])
-    card_line = ""
+    extra_line = ""
     if is_admin(m.chat.id):
-        card_line = f"\n\n💳 To'lov kartasi: <code>{esc(d.get('card') or setting('card'))}</code>"
-    await m.answer("Tekshiring:\n\n" + ad_text(d) + card_line, reply_markup=kb,
+        extra_line = (f"\n\n📞 Ish beruvchi raqami: {esc(d.get('contact', ''))}"
+                      f"\n💳 To'lov kartasi: <code>{esc(d.get('card') or setting('card'))}</code>")
+    else:
+        extra_line = "\n\n⏳ E'lon adminlar tasdiqlagandan keyin kanalga joylanadi."
+    await m.answer("Tekshiring:\n\n" + ad_text(d) + extra_line, reply_markup=kb,
                    disable_web_page_preview=True)
     await state.set_state(Ad.confirm)
 
 
-@router.message(Ad.extra, F.text)
-async def ad_extra(m: Message, state: FSMContext):
-    await state.update_data(extra=m.text.strip(), card="")
-    uid = m.from_user.id
-    if not is_admin(uid):
-        return await show_preview(m, state)
-    # faqat adminlar karta tanlay oladi
+async def ask_card(m, state):
+    uid = m.chat.id
     rows = q("SELECT * FROM admin_cards WHERE admin_id=?", (uid,))
     buttons = [(r["card"][:30], f"ac:{r['id']}") for r in rows]
     buttons.append(("⭐ Standart karta", "ac:0"))
     await m.answer("💳 Ishga yozilganlar to'lov qiladigan kartani tanlang:",
                    reply_markup=inline(buttons, 1))
     await state.set_state(Ad.card)
+
+
+@router.message(Ad.extra, F.text)
+async def ad_extra(m: Message, state: FSMContext):
+    await state.update_data(extra=m.text.strip(), card="", contact="")
+    if not is_admin(m.from_user.id):
+        return await show_preview(m, state)
+    await m.answer("📞 Ish beruvchining telefon raqamini yozing.\n"
+                   "Ishga yozilib to'lov qilganlarga shu raqam beriladi (sizning raqamingiz emas):")
+    await state.set_state(Ad.contact)
+
+
+@router.message(Ad.contact, F.text)
+async def ad_contact(m: Message, state: FSMContext):
+    if len(re.sub(r"\D", "", m.text)) < 7:
+        return await m.answer("Telefon raqamini to'g'ri yozing (masalan: +998901234567).")
+    await state.update_data(contact=m.text.strip())
+    await ask_card(m, state)
 
 
 @router.callback_query(Ad.card, F.data.startswith("ac:"))
@@ -513,31 +694,68 @@ async def ad_no(c: CallbackQuery, state: FSMContext):
 @router.callback_query(Ad.confirm, F.data == "ad:ok")
 async def ad_ok(c: CallbackQuery, state: FSMContext, bot: Bot):
     d = await state.get_data()
-    ad_id = q("INSERT INTO ads(owner,kind,price,time,when_,lat,lon,extra,card) VALUES(?,?,?,?,?,?,?,?,?)",
-              (c.from_user.id, d["kind"], d["price"], d["time"], d["when"],
-               d["lat"], d["lon"], d["extra"], d.get("card", "")), commit=True)
-    b = InlineKeyboardBuilder()
-    b.button(text="✍️ Ishga yozilish", url=f"https://t.me/{BOT_USERNAME}?start=apply_{ad_id}")
-    msg = await bot.send_message(CHANNEL_ID, ad_text(d) + f"\n\n🆔 #{ad_id}",
-                                 reply_markup=b.as_markup(), disable_web_page_preview=True)
-    q("UPDATE ads SET msg_id=? WHERE id=?", (msg.message_id, ad_id), commit=True)
     await state.clear()
-    await c.message.edit_text(f"✅ E'lon kanalga joylandi! (#{ad_id})")
-    await c.message.answer("Menyu:", reply_markup=main_menu(c.from_user.id))
-    if c.from_user.id != ADMIN_ID:
-        await bot.send_message(ADMIN_ID, f"📢 Yangi e'lon #{ad_id} joylandi. Egasi: <code>{c.from_user.id}</code>")
+    uid = c.from_user.id
+    admin = is_admin(uid)
+    ad_id = q("INSERT INTO ads(owner,kind,price,people,time,when_,lat,lon,addr,extra,card,contact,status) "
+              "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+              (uid, d["kind"], d["price"], d.get("people", 1), d["time"], d["when"],
+               d.get("lat"), d.get("lon"), d.get("addr", ""), d["extra"], d.get("card", ""),
+               d.get("contact", ""), "active" if admin else "pending"), commit=True)
+    if admin:
+        await post_to_channel(bot, ad_id)
+        await c.message.edit_text(f"✅ E'lon kanalga joylandi! (#{ad_id})")
+        if uid != ADMIN_ID:
+            await bot.send_message(ADMIN_ID, f"📢 Yangi e'lon #{ad_id} joylandi. Admin: <code>{uid}</code>")
+    else:
+        await send_for_approval(bot, ad_id)
+        await c.message.edit_text(f"⏳ E'lon #{ad_id} adminlarga yuborildi. "
+                                  "Tasdiqlangach kanalga joylanadi.")
+    await c.message.answer("Menyu:", reply_markup=main_menu(uid))
 
 
 # ---------------------------------------------------------------- ISHGA YOZILISH
+ACTIVE_ST = ("awaiting_pay", "paid_check", "paid")
+HOLD_12H = 12 * 3600
+
+
+async def append_note(msg, note):
+    try:
+        if msg.photo or msg.caption is not None:
+            await msg.edit_caption(caption=(msg.html_caption or "") + "\n\n" + note, reply_markup=None)
+        else:
+            await msg.edit_text((msg.html_text or "") + "\n\n" + note, reply_markup=None,
+                                disable_web_page_preview=True)
+    except Exception as e:
+        logging.warning(e)
+
+
+def place_text(ad):
+    if ad["lat"] is not None and ad["lon"] is not None:
+        return f"📍 <a href=\"https://maps.google.com/?q={ad['lat']},{ad['lon']}\">Ish manzili</a>" + \
+               (f"\n🏠 {esc(ad['addr'])}" if ad["addr"] else "")
+    return f"📍 Manzil: {esc(ad['addr'] or '—')}"
+
+
 async def begin_apply(m: Message, state: FSMContext, ad_id: int):
+    uid = m.chat.id
     ad = q("SELECT * FROM ads WHERE id=?", (ad_id,), one=True)
     if not ad or ad["status"] != "active":
-        return await m.answer("Bu e'lon topilmadi yoki yopilgan.", reply_markup=main_menu(m.chat.id))
-    if ad["owner"] == m.chat.id:
-        return await m.answer("O'z e'loningizga yozila olmaysiz.", reply_markup=main_menu(m.chat.id))
-    if q("SELECT 1 FROM apps WHERE ad_id=? AND user_id=? AND status!='rejected'",
-         (ad_id, m.chat.id), one=True):
-        return await m.answer("Siz bu ishga allaqachon yozilgansiz.", reply_markup=main_menu(m.chat.id))
+        return await m.answer("Bu e'lon topilmadi yoki yopilgan.", reply_markup=main_menu(uid))
+    if ad["owner"] == uid:
+        return await m.answer("O'z e'loningizga yozila olmaysiz.", reply_markup=main_menu(uid))
+    if q("SELECT 1 FROM apps WHERE ad_id=? AND user_id=? AND status NOT IN "
+         "('rejected','cancelled','cancelled_admin')", (ad_id, uid), one=True):
+        return await m.answer("Siz bu ishga allaqachon yozilgansiz.", reply_markup=main_menu(uid))
+    if reserved_count(ad_id) >= (ad["people"] or 1):
+        return await m.answer("❌ Afsus, bu e'longa kerakli odam to'lgan.", reply_markup=main_menu(uid))
+    last = q("SELECT ts FROM apps WHERE user_id=? AND status IN "
+             "('awaiting_pay','paid_check','paid','cancelled') ORDER BY ts DESC LIMIT 1", (uid,), one=True)
+    if last and time.time() - last["ts"] < HOLD_12H:
+        left = int(HOLD_12H - (time.time() - last["ts"]))
+        return await m.answer(f"⏳ 12 soatda faqat 1 ta ishga yozilish mumkin.\n"
+                              f"Yana {left // 3600} soat {left % 3600 // 60} daqiqadan keyin yoza olasiz.",
+                              reply_markup=main_menu(uid))
     await state.set_state(Apply.shot1)
     await state.update_data(ad_id=ad_id)
     await m.answer(f"✍️ E'lon #{ad_id} ga yozilish.\n\n"
@@ -552,28 +770,71 @@ async def apply_shot1(m: Message, state: FSMContext):
     await state.set_state(Apply.shot2)
 
 
+async def approve_app(bot, app_id):
+    """Ariza avtomatik tasdiqlanadi. Balans yetsa avtomatik yechiladi, aks holda chek so'raladi."""
+    app = q("SELECT * FROM apps WHERE id=?", (app_id,), one=True)
+    ad = q("SELECT * FROM ads WHERE id=?", (app["ad_id"],), one=True)
+    user = get_user(app["user_id"])
+    fee = fee_int()
+    if fee <= 0 or user["balance"] >= fee:
+        q("UPDATE users SET balance=balance-? WHERE id=?", (max(fee, 0), user["id"]), commit=True)
+        q("UPDATE apps SET status='paid', paid_by='balance' WHERE id=?", (app_id,), commit=True)
+        await bot.send_message(user["id"], f"✅ Arizangiz tasdiqlandi!\n💰 Hisobingizdan {money(fee)} so'm "
+                                           f"yechildi. Qoldiq: {money(user['balance'] - max(fee, 0))} so'm")
+        await release_contacts(bot, app_id)
+        await refresh_channel(bot, ad["id"])
+        return "balance"
+    q("UPDATE apps SET status='awaiting_pay' WHERE id=?", (app_id,), commit=True)
+    card = ad["card"] or setting("card")
+    await bot.send_message(
+        user["id"],
+        f"✅ Arizangiz tasdiqlandi!\n\n💳 To'lov kartasi:\n<code>{esc(card)}</code>\n"
+        f"💵 Summa: <b>{money(fee)} so'm</b>\n\n"
+        "To'lov qilgach, <b>chek rasmini</b> shu yerga yuboring 📸\n"
+        "💡 Keyingi safar tezroq bo'lishi uchun «💰 Hisobim» orqali balansni to'ldirib qo'ying.")
+    return "card"
+
+
 @router.message(Apply.shot2, F.photo)
 async def apply_shot2(m: Message, state: FSMContext, bot: Bot):
     d = await state.get_data()
-    app_id = q("INSERT INTO apps(ad_id,user_id,shot1,shot2) VALUES(?,?,?,?)",
-               (d["ad_id"], m.from_user.id, d["shot1"], m.photo[-1].file_id), commit=True)
     await state.clear()
     ad = q("SELECT * FROM ads WHERE id=?", (d["ad_id"],), one=True)
+    if not ad or ad["status"] != "active" or reserved_count(ad["id"]) >= (ad["people"] or 1):
+        return await m.answer("❌ Afsus, bu e'longa kerakli odam to'ldi.",
+                              reply_markup=main_menu(m.from_user.id))
+    app_id = q("INSERT INTO apps(ad_id,user_id,shot1,shot2,ts) VALUES(?,?,?,?,?)",
+               (d["ad_id"], m.from_user.id, d["shot1"], m.photo[-1].file_id, int(time.time())),
+               commit=True)
+    await m.answer("✅ Ariza qabul qilindi.", reply_markup=main_menu(m.from_user.id))
+    mode = await approve_app(bot, app_id)
     target = handler_for(ad)
     u = get_user(m.from_user.id)
-    await bot.send_media_group(target, [
-        InputMediaPhoto(media=d["shot1"], caption=f"📝 Ariza #{app_id} — ish joyi"),
-        InputMediaPhoto(media=m.photo[-1].file_id, caption="Ariza beruvchining joyi")])
-    enough = "✅ yetarli" if u["balance"] >= fee_int() else "❌ yetarli emas"
-    kb = inline([("✅ Tasdiqlash", f"ap:ok:{app_id}"), ("❌ Rad etish", f"ap:no:{app_id}")])
-    await bot.send_message(
-        target, f"📝 <b>Ariza #{app_id}</b> (e'lon #{d['ad_id']})\n"
-                f"👤 {esc(u['name'])} {esc(u['surname'])}, {u['age']} yosh\n"
-                f"📞 {esc(u['phone'])}\n🏠 {esc(u['address'])}\n"
-                f"💰 Balans: {money(u['balance'])} so'm ({enough})",
-        reply_markup=kb)
-    await m.answer("⏳ Arizangiz adminga yuborildi. Tasdiqlashni kuting.",
-                   reply_markup=main_menu(m.from_user.id))
+    try:
+        await bot.send_media_group(target, [
+            InputMediaPhoto(media=d["shot1"], caption=f"📝 Ariza #{app_id} — ish joyi"),
+            InputMediaPhoto(media=m.photo[-1].file_id, caption="Ariza beruvchining joyi")])
+        note = ("✅ Balansdan yechildi" if mode == "balance"
+                else "⏳ To'lov kutilmoqda (chek kelganda tasdiqlaysiz)")
+        await bot.send_message(
+            target, f"📝 <b>Ariza #{app_id}</b> (e'lon #{d['ad_id']}) — avtomatik tasdiqlandi\n"
+                    f"👤 {esc(u['name'])} {esc(u['surname'])}, {u['age']} yosh\n"
+                    f"📞 {esc(u['phone'])}\n🏠 {esc(u['address'])}\n{note}",
+            reply_markup=inline([("🚫 Chaqirmaslik (bekor qilish)", f"cx:{app_id}")], 1))
+    except Exception as e:
+        logging.warning(e)
+
+
+def rate_kb(app_id):
+    return inline([(f"{i}⭐", f"rt:{app_id}:{i}") for i in range(1, 6)], 5)
+
+
+async def ask_rating(bot, uid, app_id):
+    try:
+        await bot.send_message(uid, "⭐ Xizmatimizni baholang: 1 — yomon, 5 — a'lo",
+                               reply_markup=rate_kb(app_id))
+    except Exception:
+        pass
 
 
 async def release_contacts(bot, app_id):
@@ -581,53 +842,156 @@ async def release_contacts(bot, app_id):
     ad = q("SELECT * FROM ads WHERE id=?", (app["ad_id"],), one=True)
     owner = get_user(ad["owner"])
     worker = get_user(app["user_id"])
+    phone = ad["contact"] or owner["phone"]
+    who = ""
+    if not is_admin(ad["owner"]):
+        who = f"👤 {esc(owner['name'])} {esc(owner['surname'])}\n"
     await bot.send_message(
         app["user_id"],
-        f"✅ To'lov qabul qilindi!\n\n📌 E'lon #{ad['id']} egasi:\n"
-        f"👤 {esc(owner['name'])} {esc(owner['surname'])}\n📞 {esc(owner['phone'])}\n"
-        f"📍 <a href=\"https://maps.google.com/?q={ad['lat']},{ad['lon']}\">Ish manzili</a>")
-    await bot.send_message(
-        ad["owner"],
-        f"🙋 E'loningiz #{ad['id']} bo'yicha ishchi topildi:\n"
-        f"👤 {esc(worker['name'])} {esc(worker['surname'])}, {worker['age']} yosh\n"
-        f"📞 {esc(worker['phone'])}")
-    await bot.send_photo(ad["owner"], worker["photo"])
+        f"✅ To'lov qabul qilindi!\n\n📌 E'lon #{ad['id']} ish beruvchisi:\n{who}"
+        f"📞 {esc(phone)}\n{place_text(ad)}\n\n"
+        "Borishingizni tasdiqlang yoki bekor qiling 👇",
+        reply_markup=inline([("✅ Boraman", f"go:y:{app_id}"), ("❌ Bormayman", f"go:n:{app_id}")]),
+        disable_web_page_preview=True)
+    cap = (f"🙋 E'loningiz #{ad['id']} bo'yicha ishchi topildi:\n"
+           f"👤 {esc(worker['name'])} {esc(worker['surname'])}, {worker['age']} yosh\n"
+           f"📞 {esc(worker['phone'])}")
+    kb = inline([("🚫 Chaqirmaslik (bekor qilish)", f"cx:{app_id}")], 1)
+    for t in dict.fromkeys([ad["owner"], handler_for(ad)]):
+        try:
+            await bot.send_photo(t, worker["photo"], caption=cap, reply_markup=kb)
+        except Exception as e:
+            logging.warning(e)
+    await ask_rating(bot, app["user_id"], app_id)
+    await ask_rating(bot, ad["owner"], app_id)
 
 
-@router.callback_query(ADM, F.data.startswith("ap:"))
-async def admin_app(c: CallbackQuery, bot: Bot):
+@router.callback_query(F.data.startswith("go:"))
+async def worker_choice(c: CallbackQuery, bot: Bot):
     _, act, app_id = c.data.split(":")
     app = q("SELECT * FROM apps WHERE id=?", (app_id,), one=True)
-    if not app or app["status"] != "new":
-        return await c.answer("Allaqachon ko'rib chiqilgan.", show_alert=True)
+    if not app or app["user_id"] != c.from_user.id or app["status"] not in ACTIVE_ST:
+        return await c.answer("Bu ariza endi faol emas.", show_alert=True)
     ad = q("SELECT * FROM ads WHERE id=?", (app["ad_id"],), one=True)
-    if not can_manage(c.from_user.id, ad):
-        return await c.answer("Bu ariza sizniki emas.", show_alert=True)
-    if act == "no":
-        q("UPDATE apps SET status='rejected' WHERE id=?", (app_id,), commit=True)
-        await bot.send_message(app["user_id"], "❌ Afsus, arizangiz rad etildi.")
-        return await c.message.edit_text(c.message.html_text + "\n\n❌ Rad etildi")
-    fee = fee_int()
-    user = get_user(app["user_id"])
-    if fee > 0 and user["balance"] >= fee:
-        # balansdan avtomatik yechish
-        q("UPDATE users SET balance=balance-? WHERE id=?", (fee, user["id"]), commit=True)
-        q("UPDATE apps SET status='paid', paid_by='balance' WHERE id=?", (app_id,), commit=True)
-        left = user["balance"] - fee
-        await bot.send_message(user["id"], f"✅ Arizangiz tasdiqlandi!\n💰 Hisobingizdan {money(fee)} so'm "
-                                           f"yechildi. Qoldiq: {money(left)} so'm")
-        await release_contacts(bot, int(app_id))
-        await c.message.edit_text(c.message.html_text + "\n\n✅ Tasdiqlandi (balansdan yechildi)")
+    u = get_user(c.from_user.id)
+    targets = list(dict.fromkeys([ad["owner"], handler_for(ad)]))
+    who = f"{esc(u['name'])} {esc(u['surname'])}, {esc(u['phone'])}"
+    if act == "y":
+        q("UPDATE apps SET go='yes' WHERE id=?", (app_id,), commit=True)
+        for t in targets:
+            try:
+                await bot.send_message(t, f"✅ Ishchi {who} e'lon #{ad['id']} ga borishini tasdiqladi.")
+            except Exception:
+                pass
+        await c.answer("Tasdiqlandi ✅")
+        await c.message.edit_reply_markup(reply_markup=inline([("❌ Bekor qilish", f"go:n:{app_id}")], 1))
     else:
-        q("UPDATE apps SET status='awaiting_pay' WHERE id=?", (app_id,), commit=True)
-        card = ad["card"] or setting("card")
-        await bot.send_message(
-            user["id"],
-            f"✅ Arizangiz tasdiqlandi!\n\n💳 To'lov kartasi:\n<code>{esc(card)}</code>\n"
-            f"💵 Summa: <b>{money(fee)} so'm</b>\n\n"
-            "To'lov qilgach, <b>chek rasmini</b> shu yerga yuboring 📸\n"
-            "💡 Keyingi safar tezroq bo'lishi uchun «💰 Hisobim» orqali balansni to'ldirib qo'ying.")
-        await c.message.edit_text(c.message.html_text + "\n\n✅ Tasdiqlandi (to'lov kutilmoqda)")
+        q("UPDATE apps SET status='cancelled', go='no' WHERE id=?", (app_id,), commit=True)
+        for t in targets:
+            try:
+                await bot.send_message(t, f"❌ Ishchi {who} e'lon #{ad['id']} ga bormaslikni tanladi (ariza bekor).")
+            except Exception:
+                pass
+        await refresh_channel(bot, ad["id"])
+        await c.answer("Bekor qilindi")
+        await append_note(c.message, "❌ Siz bu ishni bekor qildingiz.")
+
+
+@router.callback_query(F.data.startswith("cx:"))
+async def cancel_worker(c: CallbackQuery, bot: Bot):
+    app = q("SELECT * FROM apps WHERE id=?", (c.data[3:],), one=True)
+    ad = q("SELECT * FROM ads WHERE id=?", (app["ad_id"],), one=True) if app else None
+    if not app or not ad:
+        return await c.answer("Ariza topilmadi.", show_alert=True)
+    if not (c.from_user.id == ad["owner"] or can_manage(c.from_user.id, ad)):
+        return await c.answer("Bu ariza sizniki emas.", show_alert=True)
+    if app["status"] not in ACTIVE_ST:
+        return await c.answer("Allaqachon bekor qilingan.", show_alert=True)
+    q("UPDATE apps SET status='cancelled_admin', go='no' WHERE id=?", (app["id"],), commit=True)
+    try:
+        await bot.send_message(app["user_id"], f"❌ Afsus, e'lon #{ad['id']} bo'yicha sizni ishga "
+                                               "chaqirmaslikka qaror qilindi. Savollar bo'lsa, "
+                                               "«📞 Admin bilan bog'lanish» orqali yozing.")
+    except Exception:
+        pass
+    await refresh_channel(bot, ad["id"])
+    await c.answer("Bekor qilindi")
+    await append_note(c.message, "🚫 Ishchi chaqirilmaydi (bekor qilindi)")
+
+
+@router.message(F.text == "📋 Mening ishlarim")
+async def my_jobs(m: Message):
+    if not get_user(m.from_user.id):
+        return await m.answer("Avval /start bosing.")
+    rows = q("SELECT apps.*, ads.kind, ads.price, ads.when_, ads.time AS atime FROM apps "
+             "JOIN ads ON ads.id=apps.ad_id WHERE apps.user_id=? AND apps.status IN "
+             "('awaiting_pay','paid_check','paid') ORDER BY apps.id DESC LIMIT 10", (m.from_user.id,))
+    if not rows:
+        return await m.answer("Hozircha faol ishlaringiz yo'q.")
+    names = {"awaiting_pay": "💳 to'lov kutilmoqda", "paid_check": "🧾 chek tekshirilmoqda",
+             "paid": "✅ to'langan"}
+    for r in rows:
+        btns = []
+        if r["status"] == "paid" and r["go"] != "yes":
+            btns.append(("✅ Boraman", f"go:y:{r['id']}"))
+        btns.append(("❌ Bekor qilish" if r["go"] == "yes" or r["status"] != "paid"
+                     else "❌ Bormayman", f"go:n:{r['id']}"))
+        await m.answer(f"📌 E'lon #{r['ad_id']} | {esc(r['kind'])} | {money(r['price'])} so'm\n"
+                       f"📅 {esc(r['when_'])} | 🕒 {esc(r['atime'])}\n"
+                       f"Holat: {names[r['status']]}" + (" | borishni tasdiqlagansiz" if r["go"] == "yes" else ""),
+                       reply_markup=inline(btns, 2))
+
+
+# ---- baholash
+def stars(avg):
+    n = int(round(avg))
+    return "⭐" * n + "☆" * (5 - n)
+
+
+@router.message(F.text == "⭐ Baholar")
+async def ratings_panel(m: Message):
+    rows = q("SELECT score, role FROM ratings")
+    if not rows:
+        t = "⭐ Hali baholar yo'q. Birinchi bo'lib baholang!"
+    else:
+        n = len(rows)
+        avg = sum(r["score"] for r in rows) / n
+        t = (f"⭐ <b>Xizmatimiz bahosi</b>\n\nUmumiy o'rtacha: <b>{avg:.1f} / 5</b> {stars(avg)}\n"
+             f"Baholar soni: {n}\n\n")
+        for sc in (5, 4, 3, 2, 1):
+            t += f"{sc}⭐ — {sum(1 for r in rows if r['score'] == sc)} ta\n"
+        for role, label in (("owner", "📢 E'lon beruvchilar"), ("worker", "👷 Ishga boruvchilar")):
+            sub = [r["score"] for r in rows if r["role"] == role]
+            if sub:
+                t += f"\n{label}: {sum(sub) / len(sub):.1f} / 5 ({len(sub)} ta)"
+    await m.answer(t, reply_markup=inline([("⭐ Baholash", "rt_open")], 1))
+
+
+@router.callback_query(F.data == "rt_open")
+async def rate_open(c: CallbackQuery):
+    await c.answer()
+    await c.message.answer("Xizmatimizni baholang: 1 — yomon, 5 — a'lo", reply_markup=rate_kb(0))
+
+
+@router.callback_query(F.data.startswith("rt:"))
+async def rate_cb(c: CallbackQuery):
+    _, app_id, score = c.data.split(":")
+    app_id, score = int(app_id), int(score)
+    if not 1 <= score <= 5:
+        return await c.answer()
+    role = "general"
+    if app_id:
+        app = q("SELECT * FROM apps WHERE id=?", (app_id,), one=True)
+        if not app:
+            return await c.answer("Topilmadi.", show_alert=True)
+        role = "worker" if c.from_user.id == app["user_id"] else "owner"
+    q("INSERT OR REPLACE INTO ratings(user_id,app_id,score,role,ts) VALUES(?,?,?,?,?)",
+      (c.from_user.id, app_id, score, role, int(time.time())), commit=True)
+    await c.answer("Rahmat!")
+    try:
+        await c.message.edit_text(f"⭐ Baholaganingiz uchun rahmat! Bahoyingiz: {score}/5")
+    except Exception:
+        pass
 
 
 @router.message(StateFilter(None), F.photo)
@@ -659,6 +1023,7 @@ async def admin_pay(c: CallbackQuery, bot: Bot):
     if act == "ok":
         q("UPDATE apps SET status='paid', paid_by='card' WHERE id=?", (app_id,), commit=True)
         await release_contacts(bot, int(app_id))
+        await refresh_channel(bot, ad["id"])
         await c.message.edit_caption(caption=c.message.html_caption + "\n\n✅ Tasdiqlandi")
     else:
         q("UPDATE apps SET status='awaiting_pay' WHERE id=?", (app_id,), commit=True)
@@ -678,7 +1043,8 @@ def admin_kb(uid):
             ("📨 Xabar yuborish", "adm:bc"), ("🚫 Bloklash", "adm:ban"),
             ("♻️ Blokdan chiqarish", "adm:unban"),
         ])
-    return inline([("💳 Kartalarim", "adm:cards"), ("📝 Arizalarim", "adm:apps")], 1)
+    return inline([("🔎 Foydalanuvchi qidirish", "adm:find"), ("👥 Foydalanuvchilar", "adm:users"),
+                   ("💳 Kartalarim", "adm:cards"), ("📝 Arizalarim", "adm:apps")], 1)
 
 
 @router.message(ADM, F.text == "🛠 Admin panel")
@@ -700,11 +1066,13 @@ async def send_user_card(m, uid):
            f"🆔 <code>{uid}</code>\n🔗 @{esc(u['username'] or '—')}\n"
            f"💰 Balans: <b>{money(u['balance'])} so'm</b>\n"
            f"📢 E'lonlari: {ads_n} | 📝 Arizalari: {apps_n}\n🚫 Bloklangan: {blocked}")
-    kb = inline([
-        ("💰 Balans o'zgartirish", f"bal:{uid}"), ("✉️ Xabar yozish", f"rp:{uid}"),
-        ("♻️ Blokdan chiqarish" if u["banned"] else "🚫 Bloklash",
-         f"unban:{uid}" if u["banned"] else f"ban:{uid}"),
-    ], 1)
+    kb = None
+    if is_main(m.chat.id):
+        kb = inline([
+            ("💰 Balans o'zgartirish", f"bal:{uid}"), ("✉️ Xabar yozish", f"rp:{uid}"),
+            ("♻️ Blokdan chiqarish" if u["banned"] else "🚫 Bloklash",
+             f"unban:{uid}" if u["banned"] else f"ban:{uid}"),
+        ], 1)
     await m.answer_photo(u["photo"], caption=cap, reply_markup=kb)
 
 
@@ -726,13 +1094,13 @@ def search_users(t):
              (like, like, like))
 
 
-@router.callback_query(MAIN, F.data.startswith("u:"))
+@router.callback_query(ADM, F.data.startswith("u:"))
 async def user_card_cb(c: CallbackQuery):
     await c.answer()
     await send_user_card(c.message, int(c.data[2:]))
 
 
-@router.message(MAIN, Adm.find, F.text)
+@router.message(ADM, Adm.find, F.text)
 async def adm_find(m: Message, state: FSMContext):
     await state.clear()
     rows = search_users(m.text)
@@ -810,17 +1178,40 @@ async def delcard(c: CallbackQuery):
 @router.callback_query(ADM, F.data == "adm:apps")
 async def adm_apps(c: CallbackQuery):
     await c.answer()
+    base = ("SELECT apps.*, ads.owner, u.name, u.surname, u.phone FROM apps "
+            "JOIN ads ON ads.id=apps.ad_id JOIN users u ON u.id=apps.user_id "
+            "WHERE apps.status IN ('awaiting_pay','paid_check','paid') ")
     if is_main(c.from_user.id):
-        rows = q("SELECT apps.*, ads.owner FROM apps JOIN ads ON ads.id=apps.ad_id "
-                 "WHERE apps.status IN ('new','awaiting_pay','paid_check') ORDER BY apps.id DESC LIMIT 20")
+        rows = q(base + "ORDER BY apps.id DESC LIMIT 15")
     else:
-        rows = q("SELECT apps.*, ads.owner FROM apps JOIN ads ON ads.id=apps.ad_id "
-                 "WHERE ads.owner=? AND apps.status IN ('new','awaiting_pay','paid_check') "
-                 "ORDER BY apps.id DESC LIMIT 20", (c.from_user.id,))
-    names = {"new": "yangi", "awaiting_pay": "to'lov kutilmoqda", "paid_check": "chek tekshiriladi"}
-    t = "\n".join(f"Ariza #{r['id']} (e'lon #{r['ad_id']}) — {names.get(r['status'], r['status'])}"
-                  for r in rows) or "Kutilayotgan arizalar yo'q."
-    await c.message.answer("📝 Arizalar:\n\n" + t)
+        rows = q(base + "AND ads.owner=? ORDER BY apps.id DESC LIMIT 15", (c.from_user.id,))
+    if not rows:
+        return await c.message.answer("Faol arizalar yo'q.")
+    names = {"awaiting_pay": "to'lov kutilmoqda", "paid_check": "chek tekshiriladi", "paid": "to'langan"}
+    for r in rows:
+        go = " | borishini tasdiqlagan" if r["go"] == "yes" else ""
+        await c.message.answer(
+            f"Ariza #{r['id']} (e'lon #{r['ad_id']}) — {esc(r['name'])} {esc(r['surname'])}, "
+            f"{esc(r['phone'])}\nHolat: {names[r['status']]}{go}",
+            reply_markup=inline([("🚫 Chaqirmaslik (bekor qilish)", f"cx:{r['id']}")], 1))
+
+
+@router.callback_query(ADM, F.data == "adm:find")
+async def adm_find_start(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    await state.set_state(Adm.find)
+    await c.message.answer("Qidirish uchun ism, familiya, telefon, @username yoki ID yozing:",
+                           reply_markup=cancel_kb())
+
+
+@router.callback_query(ADM, F.data == "adm:users")
+async def adm_users(c: CallbackQuery):
+    await c.answer()
+    rows = q("SELECT * FROM users ORDER BY rowid DESC LIMIT 20")
+    if not rows:
+        return await c.message.answer("Foydalanuvchilar yo'q.")
+    await c.message.answer("👥 Oxirgi 20 ta. Anketasini ko'rish uchun tanlang:",
+                           reply_markup=users_buttons(rows))
 
 
 @router.callback_query(ADM, F.data == "adm:cards")
@@ -841,25 +1232,23 @@ async def admin_cb(c: CallbackQuery, state: FSMContext):
         t += "\n👮 Qo'shimcha adminlar: " + str(n("SELECT COUNT(*) FROM admins"))
         t += "\n🚫 Bloklangan: " + str(n("SELECT COUNT(*) FROM users WHERE banned=1"))
         t += "\n📢 E'lonlar: " + str(n("SELECT COUNT(*) FROM ads"))
+        t += "\n⏳ Tasdiq kutayotgan e'lonlar: " + str(n("SELECT COUNT(*) FROM ads WHERE status='pending'"))
         t += "\n📝 Arizalar: " + str(n("SELECT COUNT(*) FROM apps"))
         t += "\n✅ To'langan: " + str(n("SELECT COUNT(*) FROM apps WHERE status='paid'"))
+        avg = n("SELECT COALESCE(AVG(score),0) FROM ratings")
+        t += f"\n⭐ O'rtacha baho: {avg:.1f} ({n('SELECT COUNT(*) FROM ratings')} ta)"
         t += "\n💰 Jami balanslar: " + money(n("SELECT COALESCE(SUM(balance),0) FROM users")) + " so'm"
         await c.message.answer(t)
-    elif act == "find":
-        await state.set_state(Adm.find)
-        await c.message.answer("Qidirish uchun ism, familiya, telefon, @username yoki ID yozing:")
-    elif act == "users":
-        rows = q("SELECT * FROM users ORDER BY rowid DESC LIMIT 20")
-        if not rows:
-            return await c.message.answer("Foydalanuvchilar yo'q.")
-        await c.message.answer("👥 Oxirgi 20 ta. Anketasini ko'rish uchun tanlang:",
-                               reply_markup=users_buttons(rows))
     elif act == "ads":
         rows = q("SELECT * FROM ads ORDER BY id DESC LIMIT 10")
         if not rows:
             return await c.message.answer("E'lonlar yo'q.")
         for r in rows:
-            kb = inline([("🔒 Yopish", f"adclose:{r['id']}")], 1) if r["status"] == "active" else None
+            kb = None
+            if r["status"] == "active":
+                kb = inline([("🔒 Yopish", f"adclose:{r['id']}")], 1)
+            elif r["status"] == "pending":
+                kb = inline([("✅ Tasdiqlash", f"adv:ok:{r['id']}"), ("❌ Rad etish", f"adv:no:{r['id']}")])
             await c.message.answer(
                 f"#{r['id']} | {r['kind']} | {money(r['price'])} | {r['when_']} | {r['status']} | egasi: {r['owner']}",
                 reply_markup=kb)
@@ -974,14 +1363,9 @@ async def bal_save(m: Message, state: FSMContext, bot: Bot):
 @router.callback_query(MAIN, F.data.startswith("adclose:"))
 async def ad_close(c: CallbackQuery, bot: Bot):
     ad_id = int(c.data.split(":")[1])
-    ad = q("SELECT * FROM ads WHERE id=?", (ad_id,), one=True)
     q("UPDATE ads SET status='closed' WHERE id=?", (ad_id,), commit=True)
-    try:
-        await bot.edit_message_text(chat_id=CHANNEL_ID, message_id=ad["msg_id"],
-                                    text=f"❌ E'lon #{ad_id} yopildi.")
-    except Exception as e:
-        logging.warning(e)
-    await c.message.edit_text(f"#{ad_id} yopildi 🔒")
+    await refresh_channel(bot, ad_id)
+    await c.message.edit_text(f"#{ad_id} yopildi 🔒 (kanalda holati bilan qoladi)")
 
 
 @router.callback_query(MAIN, F.data.startswith("ban:"))
@@ -1053,6 +1437,7 @@ async def start_web():
     site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", "10000")))
     await site.start()
     return runner
+
 
 async def main():
     global BOT_USERNAME
